@@ -45,12 +45,12 @@ Route::get('/', function () {
 
 // ২. ড্যাশবোর্ড রাউট (যা কন্ট্রোলার থেকে ডাটা নিয়ে আসবে)
 Route::get('dashboard', [DashboardController::class, 'index'])
-    ->middleware(['auth', 'roles:editor,admin,super-admin'])
+    ->middleware(['auth', 'roles:editor,admin,super-admin,accountant,teacher'])
     ->name('dashboard.dashboard');
 
 // ৩. প্যাকেজের /admin ইউআরএল ওভাররাইড করে ডাইরেক্ট স্কুল ড্যাশবোর্ড দেখাবে
 Route::get('admin', [DashboardController::class, 'index'])
-    ->middleware(['auth', 'roles:editor,admin,super-admin'])
+    ->middleware(['auth', 'roles:editor,admin,super-admin,accountant,teacher'])
     ->name('tyro-dashboard.index');
 
 // Tyro Dashboard এর মিডলওয়্যার

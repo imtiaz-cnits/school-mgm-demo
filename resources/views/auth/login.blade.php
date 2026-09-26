@@ -47,7 +47,7 @@
         }
     </style>
 </head>
-<body class="font-sans text-gray-900 antialiased overflow-hidden">
+<body class="font-sans text-gray-900 antialiased overflow-x-hidden min-h-screen">
 
     <div class="flex min-h-screen bg-white dark:bg-themeDark relative">
         
@@ -92,7 +92,7 @@
         </div>
 
         <!-- Right Form Column -->
-        <div class="w-full lg:w-1/2 flex items-center justify-center p-8 sm:p-12 lg:p-24 bg-gray-50 dark:bg-themeDark relative">
+        <div class="w-full lg:w-1/2 flex items-center justify-center py-10 px-6 sm:px-12 lg:px-16 xl:px-20 bg-gray-50 dark:bg-themeDark relative min-h-screen">
             
             <div class="w-full max-w-md">
                 
@@ -162,6 +162,85 @@
                         <svg class="w-5 h-5 ml-3 group-hover:translate-x-2 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
                     </button>
                     
+                    <!-- Demo Quick Access Credentials -->
+                    <div class="mt-6 pt-5 border-t border-gray-200/70 dark:border-gray-800">
+                        <div class="flex items-center justify-between mb-3 px-0.5">
+                            <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-[0.2em] flex items-center gap-1.5">
+                                <span class="w-1.5 h-1.5 rounded-full bg-themeBlue animate-pulse"></span>
+                                Demo Quick Access
+                            </span>
+                            <span class="text-[9px] font-black uppercase tracking-wider text-themeBlue dark:text-themeBlue/90 bg-themeBlue/10 dark:bg-themeBlue/15 px-2 py-0.5 rounded-full border border-themeBlue/20">
+                                Click to Fill
+                            </span>
+                        </div>
+
+                        <!-- 3 Demo Role Buttons Grid -->
+                        <div class="grid grid-cols-3 gap-2.5">
+                            <!-- Super Admin -->
+                            <button type="button" 
+                                    onclick="fillCredentials('admin@example.com', 'password', this)"
+                                    class="demo-role-btn group relative flex flex-col items-center justify-center p-3 rounded-2xl border-2 border-gray-100 dark:border-gray-800/90 bg-white dark:bg-themeNavy/50 hover:border-themeBlue dark:hover:border-themeBlue hover:bg-themeBlue/[0.03] dark:hover:bg-themeBlue/10 transition-all duration-200 hover:-translate-y-0.5 shadow-sm hover:shadow-md cursor-pointer text-center">
+                                <div class="w-8 h-8 rounded-xl bg-blue-50 dark:bg-themeBlue/20 text-themeBlue flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                    </svg>
+                                </div>
+                                <span class="text-xs font-black text-gray-800 dark:text-gray-100 uppercase tracking-wider group-hover:text-themeBlue transition-colors leading-tight">
+                                    Super Admin
+                                </span>
+                                <span class="text-[9px] font-bold text-gray-400 dark:text-gray-500 mt-1 font-mono tracking-tight truncate max-w-full">
+                                    admin@...
+                                </span>
+                                <!-- Selected check indicator -->
+                                <div class="role-check hidden absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-themeBlue text-white flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </div>
+                            </button>
+
+                            <!-- Accountant -->
+                            <button type="button" 
+                                    onclick="fillCredentials('accountant@example.com', 'password', this)"
+                                    class="demo-role-btn group relative flex flex-col items-center justify-center p-3 rounded-2xl border-2 border-gray-100 dark:border-gray-800/90 bg-white dark:bg-themeNavy/50 hover:border-themeGreen dark:hover:border-themeGreen hover:bg-themeGreen/[0.03] dark:hover:bg-themeGreen/10 transition-all duration-200 hover:-translate-y-0.5 shadow-sm hover:shadow-md cursor-pointer text-center">
+                                <div class="w-8 h-8 rounded-xl bg-emerald-50 dark:bg-themeGreen/20 text-themeGreen flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                    </svg>
+                                </div>
+                                <span class="text-xs font-black text-gray-800 dark:text-gray-100 uppercase tracking-wider group-hover:text-themeGreen transition-colors leading-tight">
+                                    Accountant
+                                </span>
+                                <span class="text-[9px] font-bold text-gray-400 dark:text-gray-500 mt-1 font-mono tracking-tight truncate max-w-full">
+                                    accountant@...
+                                </span>
+                                <!-- Selected check indicator -->
+                                <div class="role-check hidden absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-themeGreen text-white flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </div>
+                            </button>
+
+                            <!-- Teacher -->
+                            <button type="button" 
+                                    onclick="fillCredentials('teacher@example.com', 'password', this)"
+                                    class="demo-role-btn group relative flex flex-col items-center justify-center p-3 rounded-2xl border-2 border-gray-100 dark:border-gray-800/90 bg-white dark:bg-themeNavy/50 hover:border-indigo-500 dark:hover:border-indigo-400 hover:bg-indigo-50/[0.04] dark:hover:bg-indigo-500/10 transition-all duration-200 hover:-translate-y-0.5 shadow-sm hover:shadow-md cursor-pointer text-center">
+                                <div class="w-8 h-8 rounded-xl bg-indigo-50 dark:bg-indigo-500/20 text-indigo-500 dark:text-indigo-400 flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14zm-4 6v-7.5l4-2.222" />
+                                    </svg>
+                                </div>
+                                <span class="text-xs font-black text-gray-800 dark:text-gray-100 uppercase tracking-wider group-hover:text-indigo-500 dark:group-hover:text-indigo-400 transition-colors leading-tight">
+                                    Teacher
+                                </span>
+                                <span class="text-[9px] font-bold text-gray-400 dark:text-gray-500 mt-1 font-mono tracking-tight truncate max-w-full">
+                                    teacher@...
+                                </span>
+                                <!-- Selected check indicator -->
+                                <div class="role-check hidden absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-indigo-500 text-white flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+                    
                 </form>
 
             </div>
@@ -180,6 +259,44 @@
     </div>
 
     <script>
+        function fillCredentials(email, password, element) {
+            const emailInput = document.getElementById('email');
+            const passwordInput = document.getElementById('password');
+            
+            if (emailInput && passwordInput) {
+                emailInput.value = email;
+                passwordInput.value = password;
+                
+                // Trigger reactive events
+                emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+                emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+                passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+                passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+                // Focus on submit button or give visual highlight to inputs
+                [emailInput, passwordInput].forEach(el => {
+                    el.classList.add('!border-themeBlue', 'ring-4', 'ring-themeBlue/25');
+                    setTimeout(() => {
+                        el.classList.remove('!border-themeBlue', 'ring-4', 'ring-themeBlue/25');
+                    }, 800);
+                });
+
+                // Clear previous active states on demo buttons
+                document.querySelectorAll('.demo-role-btn').forEach(btn => {
+                    btn.classList.remove('!border-themeBlue', '!border-themeGreen', '!border-indigo-500', 'ring-2', 'ring-themeBlue/30', 'ring-themeGreen/30', 'ring-indigo-500/30', 'shadow-md');
+                    const chk = btn.querySelector('.role-check');
+                    if (chk) chk.classList.add('hidden');
+                });
+
+                // Set active styling on clicked button
+                if (element) {
+                    element.classList.add('ring-2', 'shadow-md');
+                    const chk = element.querySelector('.role-check');
+                    if (chk) chk.classList.remove('hidden');
+                }
+            }
+        }
+
         function togglePasswordVisibility() {
             const passwordInput = document.getElementById('password');
             const eyeOpenIcon = document.getElementById('eyeOpenIcon');
