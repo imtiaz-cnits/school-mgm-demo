@@ -1,0 +1,656 @@
+@extends('tyro-dashboard::layouts.admin')
+
+@section('title', 'Smart Marks Entry')
+
+@section('content')
+<div x-data="marksFilterController()" class="w-full min-h-screen">
+    
+    <!-- Header Section -->
+    <div class="mb-8 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
+        <div>
+            <h1 class="text-3xl font-black text-gray-900 dark:text-white tracking-tight flex items-center gap-3">
+                <svg class="w-8 h-8 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+                Smart Marks Entry
+            </h1>
+            <p class="text-sm font-medium text-gray-555 dark:text-gray-400 mt-1">Record and manage terminal examination marks for students</p>
+        </div>
+    </div>
+
+    @if($errors->any())
+        <div class="mb-6 p-4 bg-red-100 dark:bg-red-950/20 border-l-4 border-red-500 text-red-700 dark:text-red-400 font-bold rounded-r-lg shadow-sm">
+            {{ $errors->first() }}
+        </div>
+    @endif
+
+    <!-- Filters Card -->
+    <div class="bg-white dark:bg-themeNavy border border-gray-100 dark:border-white/[0.06] rounded-3xl p-6 shadow-sm hover:shadow-md transition-all duration-300 mb-8">
+        <form action="{{ route('marks.index') }}" method="GET" @submit="
+            if(!form.session_year_id) { event.preventDefault(); showAlert('Please select Session!', 'Validation'); return; }
+            if(!form.branch_id) { event.preventDefault(); showAlert('Please select Branch!', 'Validation'); return; }
+            if(!form.exam_id) { event.preventDefault(); showAlert('Please select Exam!', 'Validation'); return; }
+            if(!form.class_id) { event.preventDefault(); showAlert('Please select Class!', 'Validation'); return; }
+            if(hasMultipleSections && !form.section_id) { event.preventDefault(); showAlert('Please select Section!', 'Validation'); return; }
+            if(!form.subject_id) { event.preventDefault(); showAlert('Please select Subject!', 'Validation'); return; }
+        ">
+            
+            <input type="hidden" name="session_year_id" :value="form.session_year_id">
+            <input type="hidden" name="branch_id" :value="form.branch_id">
+            <input type="hidden" name="exam_id" :value="form.exam_id">
+            <input type="hidden" name="class_id" :value="form.class_id">
+            <input type="hidden" name="section_id" :value="form.section_id">
+            <input type="hidden" name="subject_id" :value="form.subject_id">
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6 transition-all duration-300" :class="hasMultipleSections ? 'lg:grid-cols-4' : 'lg:grid-cols-3'">
+                <!-- Branch Dropdown -->
+                <div class="relative" @click.away="if(activeDropdown === 'branch') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Select Branch *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'branch' ? null : 'branch'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="branchText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'branch'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        @foreach($branches as $branch)
+                            <button type="button" @click="selectBranch('{{ $branch->id }}', '{{ $branch->branch_name }}')" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.branch_id == '{{ $branch->id }}' ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span>{{ $branch->branch_name }}</span>
+                                <template x-if="form.branch_id == '{{ $branch->id }}'">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        @endforeach
+                    </div>
+                </div>
+
+                <!-- Session Dropdown -->
+                <div class="relative" @click.away="if(activeDropdown === 'session') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Academic Session *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'session' ? null : 'session'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="sessionText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'session'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        @foreach($sessions as $session)
+                            <button type="button" @click="selectSession('{{ $session->id }}', '{{ $session->session_name }}')" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.session_year_id == '{{ $session->id }}' ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span>{{ $session->session_name }}</span>
+                                <template x-if="form.session_year_id == '{{ $session->id }}'">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        @endforeach
+                    </div>
+                </div>
+
+                <!-- Class Dropdown -->
+                <div class="relative" @click.away="if(activeDropdown === 'class') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Select Class *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'class' ? null : 'class'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="classText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'class'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        @foreach($classes as $class)
+                            <button type="button" @click="selectClass('{{ $class->id }}', '{{ $class->class_name }}')" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.class_id == '{{ $class->id }}' ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span>{{ $class->class_name }}</span>
+                                <template x-if="form.class_id == '{{ $class->id }}'">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        @endforeach
+                    </div>
+                </div>
+
+                <!-- Section Dropdown (Auto-appears when class has multiple sections) -->
+                <div x-show="hasMultipleSections" x-cloak x-transition class="relative" @click.away="if(activeDropdown === 'section') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Select Section *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'section' ? null : 'section'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="sectionText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'section'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        <template x-for="sec in availableSections" :key="sec.id">
+                            <button type="button" @click="selectSection(sec.id, sec.section_name)" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.section_id == sec.id ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span x-text="sec.section_name"></span>
+                                <template x-if="form.section_id == sec.id">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
+                <!-- Exam Dropdown -->
+                <div class="relative" @click.away="if(activeDropdown === 'exam') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Select Exam *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'exam' ? null : 'exam'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="examText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'exam'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        @foreach($exams as $exam)
+                            <button type="button" @click="selectExam('{{ $exam->id }}', '{{ $exam->name }}')" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.exam_id == '{{ $exam->id }}' ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span>{{ $exam->name }}</span>
+                                <template x-if="form.exam_id == '{{ $exam->id }}'">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        @endforeach
+                    </div>
+                </div>
+
+                <!-- Subject Dropdown -->
+                <div class="relative" @click.away="if(activeDropdown === 'subject') activeDropdown = null">
+                    <label class="block text-[10px] font-black text-gray-555 dark:text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Select Subject *</label>
+                    <button type="button" @click="activeDropdown = activeDropdown === 'subject' ? null : 'subject'" class="w-full h-11 px-3 bg-gray-50/50 dark:bg-themeNavy border-2 border-gray-100 dark:border-gray-800 rounded-xl flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-4 focus:ring-themeBlue/10 focus:border-themeBlue transition-all text-left">
+                        <span class="truncate" x-text="subjectText"></span>
+                        <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="activeDropdown === 'subject'" x-cloak class="absolute z-50 w-full mt-1.5 bg-white dark:bg-themeNavy border border-gray-150 dark:border-white/[0.08] rounded-2xl shadow-xl py-1 max-h-60 overflow-y-auto" x-transition>
+                        <template x-for="subject in filteredSubjects" :key="subject.id">
+                            <button type="button" @click="selectSubject(subject.id, subject.subject_name)" class="w-full flex items-center justify-between px-4 py-2 text-xs text-left hover:bg-gray-50 dark:hover:bg-themeDark/45 transition-colors" :class="form.subject_id == subject.id ? 'bg-indigo-50 dark:bg-themeBlue/10 text-themeBlue font-black' : 'text-gray-700 dark:text-gray-200'">
+                                <span x-text="subject.subject_name"></span>
+                                <template x-if="form.subject_id == subject.id">
+                                    <svg class="w-3.5 h-3.5 text-themeBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </template>
+                            </button>
+                        </template>
+                        
+                        <!-- ক্লাস সিলেক্ট না করলে বা সাবজেক্ট না থাকলে এই মেসেজ দেখাবে -->
+                        <template x-if="filteredSubjects.length === 0">
+                            <div class="px-4 py-3 text-xs font-medium text-gray-400 dark:text-gray-500 text-center">
+                                Please select a class first
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div>
+                    <button type="submit" class="w-full h-11 bg-gradient-to-r from-themeBlue to-themeGreen text-white font-black rounded-xl shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all uppercase tracking-[0.15em] text-xs active:scale-95 flex items-center justify-center">
+                        Load Students
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Enter Marks View Table Wrapper -->
+    @if(request()->filled(['session_year_id', 'branch_id', 'exam_id', 'class_id', 'subject_id']))
+        <div class="bg-white dark:bg-themeNavy border border-gray-100 dark:border-white/[0.06] rounded-3xl p-6 shadow-sm hover:shadow-md transition-all duration-300 relative">
+            
+            @php
+                $selectedClass = $classes->firstWhere('id', request('class_id'));
+                $classNameLower = $selectedClass ? strtolower(trim($selectedClass->class_name)) : '';
+                $isClassTen = in_array($classNameLower, ['ten', 'class ten', '10', 'class 10']);
+
+                if ($exam_schedule) {
+                    if ($isClassTen) {
+                        $col1Max = (float)($exam_schedule->mcq_marks ?? 0);
+                        $col1Label = 'MCQ';
+                        $col2Max = (float)($exam_schedule->written_marks ?? 0);
+                        $col2Label = 'Written CQ';
+                        $col3Max = (float)($exam_schedule->ct_marks ?? 0);
+                        $col3Label = 'Practical';
+                    } else {
+                        $col1Max = (float)($exam_schedule->ct_marks ?? 0);
+                        $col1Label = 'CT';
+                        $col2Max = (float)($exam_schedule->mcq_marks ?? 0);
+                        $col2Label = 'MT';
+                        $col3Max = (float)($exam_schedule->written_marks ?? 0);
+                        $col3Label = 'Terminal';
+                    }
+                    $col1Disabled = ($col1Max <= 0);
+                    $col2Disabled = ($col2Max <= 0);
+                    $col3Disabled = ($col3Max <= 0);
+                } else {
+                    $col1Max = 100;
+                    $col1Label = $isClassTen ? 'MCQ' : 'CT';
+                    $col2Max = 100;
+                    $col2Label = $isClassTen ? 'Written CQ' : 'MT';
+                    $col3Max = 100;
+                    $col3Label = $isClassTen ? 'Practical' : 'Terminal';
+                    $col1Disabled = false;
+                    $col2Disabled = false;
+                    $col3Disabled = false;
+                }
+            @endphp
+
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-6 border-b border-gray-100 dark:border-white/[0.04] pb-4">
+                <div>
+                    <h3 class="text-sm font-black text-gray-800 dark:text-gray-200 uppercase tracking-wider ml-1">Enter Marks</h3>
+                    <p class="text-[11px] font-semibold text-gray-450 mt-0.5 ml-1">
+                        Pattern: <span class="font-bold {{ $isClassTen ? 'text-purple-600 dark:text-purple-400' : 'text-themeGreen' }}">{{ $isClassTen ? 'Class Ten (MCQ | Written CQ | Practical)' : 'Play - Nine (CT | MT | Terminal)' }}</span>
+                    </p>
+                </div>
+                @if($exam_schedule)
+                    <div class="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-themeDark px-4 py-2 rounded-xl border border-gray-100 dark:border-gray-800">
+                        <span>Full: <span class="text-themeGreen font-black">{{ $exam_schedule->full_marks }}</span></span>
+                        <span class="text-gray-300">|</span>
+                        <span>Pass: <span class="text-red-500 font-black">{{ $exam_schedule->pass_marks }}</span></span>
+                        <span class="text-gray-300">|</span>
+                        @if($isClassTen)
+                            <span>MCQ: <span class="{{ $col1Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-purple-600 dark:text-purple-400' }} font-black">{{ $col1Disabled ? '0.00 (N/A)' : ($exam_schedule->mcq_marks ?? 0) }}</span></span>
+                            <span class="text-gray-300">|</span>
+                            <span>Written: <span class="{{ $col2Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-themeBlue' }} font-black">{{ $col2Disabled ? '0.00 (N/A)' : ($exam_schedule->written_marks ?? 0) }}</span></span>
+                            <span class="text-gray-300">|</span>
+                            <span>Practical: <span class="{{ $col3Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-teal-600 dark:text-teal-400' }} font-black">{{ $col3Disabled ? '0.00 (N/A)' : ($exam_schedule->ct_marks ?? 0) }}</span></span>
+                        @else
+                            <span>CT: <span class="{{ $col1Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-themeGreen' }} font-black">{{ $col1Disabled ? '0.00 (N/A)' : ($exam_schedule->ct_marks ?? 0) }}</span></span>
+                            <span class="text-gray-300">|</span>
+                            <span>MT: <span class="{{ $col2Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-amber-500' }} font-black">{{ $col2Disabled ? '0.00 (N/A)' : ($exam_schedule->mcq_marks ?? 0) }}</span></span>
+                            <span class="text-gray-300">|</span>
+                            <span>Terminal: <span class="{{ $col3Disabled ? 'text-gray-400 dark:text-gray-500' : 'text-themeBlue' }} font-black">{{ $col3Disabled ? '0.00 (N/A)' : ($exam_schedule->written_marks ?? 0) }}</span></span>
+                        @endif
+                    </div>
+                @else
+                    <div class="text-xs font-bold text-red-500 bg-red-50 dark:bg-red-950/20 px-4 py-2 rounded-xl border border-red-200 dark:border-red-900/40">Subject marks distribution not setup for this class!</div>
+                @endif
+            </div>
+
+            <div class="table-container bg-transparent !border-none !shadow-none !mt-2 !mb-0 overflow-x-auto">
+                <table class="w-full text-left border-collapse table">
+                    <thead>
+                        <tr class="!bg-transparent">
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-400 dark:text-gray-550 uppercase tracking-[0.2em] text-center w-16">Roll</th>
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-400 dark:text-gray-550 uppercase tracking-[0.2em] text-center">Student ID</th>
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-400 dark:text-gray-550 uppercase tracking-[0.2em]">Student Name</th>
+                            @if($isClassTen)
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col1Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-purple-600 dark:text-purple-400' }} uppercase tracking-[0.2em] text-center">
+                                    MCQ Marks ({{ $col1Disabled ? 'N/A' : $col1Max }})
+                                </th>
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col2Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-themeBlue' }} uppercase tracking-[0.2em] text-center">
+                                    Written Marks (CQ) ({{ $col2Disabled ? 'N/A' : $col2Max }})
+                                </th>
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col3Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-teal-600 dark:text-teal-400' }} uppercase tracking-[0.2em] text-center">
+                                    Practical Marks ({{ $col3Disabled ? 'N/A' : $col3Max }})
+                                </th>
+                            @else
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col1Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-themeGreen' }} uppercase tracking-[0.2em] text-center">
+                                    CT ({{ $col1Disabled ? 'N/A' : $col1Max }})
+                                </th>
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col2Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-amber-500' }} uppercase tracking-[0.2em] text-center">
+                                    MT ({{ $col2Disabled ? 'N/A' : $col2Max }})
+                                </th>
+                                <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black {{ $col3Disabled ? 'text-gray-400/70 dark:text-gray-500' : 'text-themeBlue' }} uppercase tracking-[0.2em] text-center">
+                                    Terminal ({{ $col3Disabled ? 'N/A' : $col3Max }})
+                                </th>
+                            @endif
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-450 dark:text-gray-550 uppercase tracking-[0.2em] text-center">Total</th>
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-450 dark:text-gray-550 uppercase tracking-[0.2em] text-center">Grade</th>
+                            <th class="!bg-transparent border-b border-gray-200 dark:border-white/[0.08] !py-3 !px-4 text-[10px] font-black text-gray-450 dark:text-gray-550 uppercase tracking-[0.2em] text-right">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @forelse($students as $student)
+                        <tr data-student-id="{{ $student->id }}" class="hover:bg-gray-50/60 dark:hover:bg-themeNavy/25 transition-colors border-b border-gray-100 dark:border-white/[0.04]">
+                            <td class="py-3.5 px-4 text-center font-mono font-black text-gray-555 dark:text-gray-400 text-sm">{{ $student->roll_number ?? '—' }}</td>
+                            <td class="py-3.5 px-4 text-center font-mono font-black text-gray-555 dark:text-gray-400 text-sm">{{ $student->student_identity ?? $student->id }}</td>
+                            <td class="py-3.5 px-4 text-sm font-bold text-gray-900 dark:text-gray-100">{{ $student->student_name ?? 'Unknown' }}</td>
+                            
+                            @if($isClassTen)
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col1Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="MCQ is not configured for this subject" class="mcq-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col1Max }}" data-max="{{ $col1Max }}" data-label="{{ $col1Label }}" class="mark-input mcq-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->mcq_mark ?? '' }}">
+                                    @endif
+                                </td>
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col2Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="Written CQ is not configured for this subject" class="written-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col2Max }}" data-max="{{ $col2Max }}" data-label="{{ $col2Label }}" class="mark-input written-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->written_mark ?? '' }}">
+                                    @endif
+                                </td>
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col3Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="Practical is not configured for this subject" class="ct-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col3Max }}" data-max="{{ $col3Max }}" data-label="{{ $col3Label }}" class="mark-input ct-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->ct_mark ?? '' }}">
+                                    @endif
+                                </td>
+                            @else
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col1Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="CT is not configured for this subject" class="ct-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col1Max }}" data-max="{{ $col1Max }}" data-label="{{ $col1Label }}" class="mark-input ct-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->ct_mark ?? '' }}">
+                                    @endif
+                                </td>
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col2Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="MT is not configured for this subject" class="mcq-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col2Max }}" data-max="{{ $col2Max }}" data-label="{{ $col2Label }}" class="mark-input mcq-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->mcq_mark ?? '' }}">
+                                    @endif
+                                </td>
+                                <td class="py-3.5 px-4 text-center">
+                                    @if($col3Disabled)
+                                        <input type="text" disabled tabindex="-1" value="—" title="Terminal is not configured for this subject" class="written-input h-9 text-center font-bold border-2 border-gray-150 dark:border-gray-800/80 rounded-lg bg-gray-150/70 dark:bg-themeDark/60 text-gray-400 dark:text-gray-500 cursor-not-allowed select-none opacity-60 w-20">
+                                    @else
+                                        <input type="number" step="0.5" min="0" max="{{ $col3Max }}" data-max="{{ $col3Max }}" data-label="{{ $col3Label }}" class="mark-input written-input h-9 text-center font-bold border-2 border-gray-100 dark:border-gray-800 rounded-lg bg-gray-50/50 dark:bg-themeNavy focus:outline-none focus:border-themeBlue focus:ring-4 focus:ring-themeBlue/10 transition-all w-20" data-id="{{ $student->id }}" value="{{ $student->mark->written_mark ?? '' }}">
+                                    @endif
+                                </td>
+                            @endif
+                            
+                            <td class="py-3.5 px-4 text-center font-black text-gray-800 dark:text-gray-200 text-lg total-display-{{ $student->id }}">
+                                {{ $student->mark->total_mark ?? 0 }}
+                            </td>
+                            <td class="py-3.5 px-4 text-center">
+                                @php
+                                    $gradeClass = 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300';
+                                    if (isset($student->mark) && $student->mark->letter_grade) {
+                                        $lg = strtoupper(trim($student->mark->letter_grade));
+                                        if (in_array($lg, ['A+', 'A'])) {
+                                            $gradeClass = 'bg-green-100 text-green-700 dark:bg-green-950/20 dark:text-green-400';
+                                        } elseif (in_array($lg, ['A-', 'B'])) {
+                                            $gradeClass = 'bg-blue-100 text-themeBlue dark:bg-blue-950/20 dark:text-blue-400';
+                                        } elseif (in_array($lg, ['C', 'D'])) {
+                                            $gradeClass = 'bg-amber-100 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400';
+                                        } elseif (in_array($lg, ['F', 'FAIL'])) {
+                                            $gradeClass = 'bg-red-100 text-red-700 dark:bg-red-950/20 dark:text-red-400';
+                                        }
+                                    }
+                                @endphp
+                                <span class="grade-display-{{ $student->id }} px-3 py-1 text-xs font-black rounded-full {{ $gradeClass }}">
+                                    {{ $student->mark->letter_grade ?? '--' }}
+                                </span>
+                            </td>
+                            <td class="py-3.5 px-4 text-right">
+                                <span class="status-{{ $student->id }} text-[10px] font-bold px-2.5 py-1 rounded-full transition-opacity duration-200 opacity-0"></span>
+                            </td>
+                        </tr>
+                        @empty
+                        <tr>
+                            <td colspan="9" class="p-8 text-center text-sm font-bold text-gray-400">No students found for this specific Branch & Session.</td>
+                        </tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    @endif
+</div>
+@endsection
+
+@push('scripts')
+<script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+<script>
+    function marksFilterController() {
+        return {
+            activeDropdown: null,
+            sessionText: '{{ $sessions->firstWhere("id", request("session_year_id"))->session_name ?? "Select Session" }}',
+            branchText: '{{ $branches->firstWhere("id", request("branch_id"))->branch_name ?? "Select Branch" }}',
+            examText: '{{ $exams->firstWhere("id", request("exam_id"))->name ?? "Select Exam" }}',
+            classText: '{{ $classes->firstWhere("id", request("class_id"))->class_name ?? "Select Class" }}',
+            sectionText: '{{ request("section_id") && $sections->firstWhere("id", request("section_id")) ? $sections->firstWhere("id", request("section_id"))->section_name : "Select Section" }}',
+            subjectText: '{{ $subjects->firstWhere("id", request("subject_id"))->subject_name ?? "Select Subject" }}',
+            
+            form: {
+                session_year_id: '{{ request("session_year_id") }}',
+                branch_id: '{{ request("branch_id") }}',
+                exam_id: '{{ request("exam_id") }}',
+                class_id: '{{ request("class_id") }}',
+                section_id: '{{ request("section_id") }}',
+                subject_id: '{{ request("subject_id") }}'
+            },
+
+            allSubjects: @json($subjects),
+            classSections: @json($classSections),
+
+            get availableSections() {
+                if (!this.form.class_id || !this.classSections[this.form.class_id]) return [];
+                return this.classSections[this.form.class_id];
+            },
+
+            get hasMultipleSections() {
+                return this.availableSections.length > 1;
+            },
+            
+            // Alpine Getter: ক্লাস সিলেক্ট করলে শুধুমাত্র ওই ক্লাসের সাবজেক্ট রিটার্ন করবে
+            get filteredSubjects() {
+                if (!this.form.class_id) return [];
+                return this.allSubjects.filter(subject => subject.class_id == this.form.class_id);
+            },
+            
+            selectSession(id, name) {
+                this.form.session_year_id = id;
+                this.sessionText = name;
+                this.activeDropdown = null;
+            },
+            selectBranch(id, name) {
+                this.form.branch_id = id;
+                this.branchText = name;
+                this.activeDropdown = null;
+            },
+            selectExam(id, name) {
+                this.form.exam_id = id;
+                this.examText = name;
+                this.activeDropdown = null;
+            },
+            selectClass(id, name) {
+                this.form.class_id = id;
+                this.classText = name;
+                this.activeDropdown = null;
+                this.form.subject_id = '';
+                this.subjectText = 'Select Subject';
+
+                // একাধিক সেকশন থাকলে সেকশন রিসেট করবে, আর একটাই সেকশন থাকলে স্বয়ংক্রিয়ভাবে সেট করবে
+                const secs = this.classSections[id] || [];
+                if (secs.length > 1) {
+                    this.form.section_id = '';
+                    this.sectionText = 'Select Section';
+                } else if (secs.length === 1) {
+                    this.form.section_id = secs[0].id;
+                    this.sectionText = secs[0].section_name;
+                } else {
+                    this.form.section_id = '';
+                    this.sectionText = 'Select Section';
+                }
+            },
+            selectSection(id, name) {
+                this.form.section_id = id;
+                this.sectionText = name;
+                this.activeDropdown = null;
+            },
+            selectSubject(id, name) {
+                this.form.subject_id = id;
+                this.subjectText = name;
+                this.activeDropdown = null;
+            }
+        };
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const session_year_id = "{{ request('session_year_id') }}";
+        const branch_id = "{{ request('branch_id') }}";
+        const exam_id = "{{ request('exam_id') }}";
+        const class_id = "{{ request('class_id') }}";
+        const subject_id = "{{ request('subject_id') }}";
+
+        function getGradeBadgeClass(grade) {
+            const g = (grade || '').toUpperCase().trim();
+            if (g === 'A+' || g === 'A') {
+                return 'px-3 py-1 text-xs font-black rounded-full bg-green-100 text-green-700 dark:bg-green-950/20 dark:text-green-400';
+            } else if (g === 'A-' || g === 'B') {
+                return 'px-3 py-1 text-xs font-black rounded-full bg-blue-100 text-themeBlue dark:bg-blue-950/20 dark:text-blue-400';
+            } else if (g === 'C' || g === 'D') {
+                return 'px-3 py-1 text-xs font-black rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400';
+            } else if (g === 'F' || g === 'FAIL') {
+                return 'px-3 py-1 text-xs font-black rounded-full bg-red-100 text-red-700 dark:bg-red-950/20 dark:text-red-400';
+            }
+            return 'px-3 py-1 text-xs font-black rounded-full bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300';
+        }
+
+        function updateLiveTotal(studentId) {
+            const row = document.querySelector(`tr[data-student-id="${studentId}"]`) || document.querySelector(`.mark-input[data-id="${studentId}"]`)?.closest('tr');
+            if (!row) return;
+            const ctInput = row.querySelector('.ct-input');
+            const mcqInput = row.querySelector('.mcq-input');
+            const writtenInput = row.querySelector('.written-input');
+
+            const ctVal = (ctInput && !ctInput.disabled) ? (parseFloat(ctInput.value) || 0) : 0;
+            const mcqVal = (mcqInput && !mcqInput.disabled) ? (parseFloat(mcqInput.value) || 0) : 0;
+            const writtenVal = (writtenInput && !writtenInput.disabled) ? (parseFloat(writtenInput.value) || 0) : 0;
+
+            const totalEl = row.querySelector(`.total-display-${studentId}`);
+            if (totalEl) {
+                const total = ctVal + mcqVal + writtenVal;
+                totalEl.textContent = total % 1 === 0 ? total : total.toFixed(2);
+            }
+        }
+
+        document.querySelectorAll('.mark-input').forEach(input => {
+            // Track previous valid value
+            input.dataset.prevValue = input.value;
+
+            input.addEventListener('focus', function() {
+                this.dataset.prevValue = this.value;
+            });
+
+            input.addEventListener('input', function() {
+                const max = parseFloat(this.dataset.max);
+                const val = parseFloat(this.value);
+                const label = this.dataset.label || 'this component';
+
+                if (!isNaN(max) && !isNaN(val) && val > max) {
+                    showAlert(`Marks entered (${val}) exceeds the base mark of ${max} for ${label}!`, 'Validation Error', { variant: 'danger' });
+                    this.value = this.dataset.prevValue || '';
+                    updateLiveTotal(this.dataset.id);
+                    return;
+                }
+                if (!isNaN(val) && val < 0) {
+                    showAlert('Marks cannot be negative!', 'Validation Error', { variant: 'danger' });
+                    this.value = 0;
+                    updateLiveTotal(this.dataset.id);
+                    return;
+                }
+
+                this.dataset.prevValue = this.value;
+                updateLiveTotal(this.dataset.id);
+            });
+
+            input.addEventListener('change', function() {
+                const max = parseFloat(this.dataset.max);
+                const val = parseFloat(this.value);
+                const label = this.dataset.label || 'this component';
+
+                if (!isNaN(max) && !isNaN(val) && val > max) {
+                    showAlert(`Marks entered (${val}) exceeds the base mark of ${max} for ${label}!`, 'Validation Error', { variant: 'danger' });
+                    this.value = this.dataset.prevValue || '';
+                    updateLiveTotal(this.dataset.id);
+                    return;
+                }
+            });
+
+            input.addEventListener('blur', function() {
+                const max = parseFloat(this.dataset.max);
+                const val = parseFloat(this.value);
+                const label = this.dataset.label || 'this component';
+
+                if (!isNaN(max) && !isNaN(val) && val > max) {
+                    showAlert(`Marks entered (${val}) exceeds the base mark of ${max} for ${label}!`, 'Validation Error', { variant: 'danger' });
+                    this.value = this.dataset.prevValue || '';
+                    updateLiveTotal(this.dataset.id);
+                    return;
+                }
+
+                saveMark(this.dataset.id);
+            });
+
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') input.blur(); 
+            });
+        });
+
+        function saveMark(studentId) {
+            const row = document.querySelector(`tr[data-student-id="${studentId}"]`) || document.querySelector(`.mark-input[data-id="${studentId}"]`)?.closest('tr');
+            if (!row) return;
+
+            const ctInput = row.querySelector('.ct-input');
+            const writtenInput = row.querySelector('.written-input');
+            const mcqInput = row.querySelector('.mcq-input');
+
+            // Pre-validation before sending AJAX (skip disabled inputs)
+            const inputsToCheck = [ctInput, mcqInput, writtenInput];
+            for (const inp of inputsToCheck) {
+                if (!inp || inp.disabled) continue;
+                const max = parseFloat(inp.dataset.max);
+                const val = parseFloat(inp.value);
+                const label = inp.dataset.label || 'this component';
+
+                if (!isNaN(max) && !isNaN(val) && val > max) {
+                    showAlert(`Marks entered (${val}) exceeds the base mark of ${max} for ${label}!`, 'Validation Error', { variant: 'danger' });
+                    inp.value = inp.dataset.prevValue || '';
+                    updateLiveTotal(studentId);
+                    inp.focus();
+                    return;
+                }
+                if (!isNaN(val) && val < 0) {
+                    showAlert('Marks cannot be negative!', 'Validation Error', { variant: 'danger' });
+                    inp.value = 0;
+                    updateLiveTotal(studentId);
+                    inp.focus();
+                    return;
+                }
+            }
+
+            const ctVal = (ctInput && !ctInput.disabled) ? (parseFloat(ctInput.value) || 0) : 0;
+            const writtenVal = (writtenInput && !writtenInput.disabled) ? (parseFloat(writtenInput.value) || 0) : 0;
+            const mcqVal = (mcqInput && !mcqInput.disabled) ? (parseFloat(mcqInput.value) || 0) : 0;
+
+            const statusLabel = row.querySelector(`.status-${studentId}`);
+            if (statusLabel) {
+                statusLabel.textContent = 'Saving...';
+                statusLabel.className = `status-${studentId} text-[10px] font-bold px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 opacity-100`;
+            }
+
+            axios.post("{{ route('marks.store.ajax') }}", {
+                _token: "{{ csrf_token() }}",
+                session_year_id: session_year_id,
+                branch_id: branch_id,
+                exam_id: exam_id,
+                class_id: class_id,
+                subject_id: subject_id,
+                student_id: studentId,
+                ct_mark: ctVal,
+                written_mark: writtenVal,
+                mcq_mark: mcqVal
+            })
+            .then(response => {
+                if (response.data.success) {
+                    const totalDisplay = row.querySelector(`.total-display-${studentId}`);
+                    if (totalDisplay) {
+                        const t = response.data.total;
+                        totalDisplay.textContent = t % 1 === 0 ? t : parseFloat(t).toFixed(2);
+                    }
+                    
+                    const gradeSpan = row.querySelector(`.grade-display-${studentId}`);
+                    if (gradeSpan) {
+                        gradeSpan.textContent = response.data.letter_grade;
+                        gradeSpan.className = `grade-display-${studentId} ${getGradeBadgeClass(response.data.letter_grade)}`;
+                    }
+
+                    if (statusLabel) {
+                        statusLabel.textContent = 'Saved ✓';
+                        statusLabel.className = `status-${studentId} text-[10px] font-bold px-2.5 py-1 rounded-full bg-green-100 dark:bg-green-950/30 text-green-700 dark:text-green-400 opacity-100`;
+                        setTimeout(() => { 
+                            statusLabel.classList.replace('opacity-100', 'opacity-0');
+                        }, 2000);
+                    }
+                }
+            })
+            .catch(error => {
+                console.error("Save Error:", error);
+                const errorMsg = error.response?.data?.message || 'Failed to save marks!';
+                showAlert(errorMsg, 'Save Error', { variant: 'danger' });
+                if (statusLabel) {
+                    statusLabel.textContent = 'Failed!';
+                    statusLabel.className = `status-${studentId} text-[10px] font-bold px-2.5 py-1 rounded-full bg-red-100 dark:bg-red-950/30 text-red-700 dark:text-red-400 opacity-100`;
+                }
+            });
+        }
+    });
+</script>
+@endpush

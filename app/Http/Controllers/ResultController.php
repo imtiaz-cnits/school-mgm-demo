@@ -1,0 +1,1318 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Exam;
+use App\Models\Student;
+use App\Models\Mark;
+use App\Models\Branch;
+use App\Models\SessionYear;
+use App\Models\Classes;
+use App\Models\Section;
+use App\Models\ExamSchedule;
+use App\Models\Attendance;
+use Illuminate\Http\Request;
+use PDF; // DomPDF
+
+class ResultController extends Controller
+{
+    // Search page for marksheets
+    public function index()
+    {
+        $exams = Exam::orderBy('name', 'asc')->get();
+        $sessions = SessionYear::orderBy('session_name', 'desc')->get();
+        $classes = Classes::all();
+        $branches = Branch::all();
+        // Get sections mapped per class where students exist
+        $classSections = Student::select('class_id', 'section_id')
+            ->whereNotNull('section_id')
+            ->distinct()
+            ->with('section:id,section_name')
+            ->get()
+            ->groupBy('class_id')
+            ->map(function ($items) {
+                return $items->pluck('section')->filter()->unique('id')->values();
+            });
+
+        return view('pages.results.index', compact('exams', 'sessions', 'classes', 'branches', 'classSections'));
+    }
+
+    // PDF generation router method: delegates to Single or Combined marksheet
+    public function generate(Request $request)
+    {
+        ini_set('memory_limit', '1024M');
+        ini_set('max_execution_time', '300');
+
+        $reportType = $request->input('report_type', 'single');
+
+        if ($reportType === 'combined') {
+            return $this->generateCombinedMarksheet($request);
+        }
+
+        return $this->generateSingleMarksheet($request);
+    }
+
+    /**
+     * Generate Single Exam Marksheet PDF (Portrait A4) - Single Student or Class Bulk
+     */
+    protected function generateSingleMarksheet(Request $request)
+    {
+        $request->validate([
+            'session_year_id' => 'required',
+            'exam_id'         => 'required',
+        ]);
+
+        if (!$request->filled('student_identity') && !$request->filled('class_id')) {
+            return back()->withErrors(['error' => 'Please provide a Student ID/Roll OR select a Class for bulk marksheet generation!']);
+        }
+
+        $exam = Exam::findOrFail($request->exam_id);
+        $sessionYear = SessionYear::findOrFail($request->session_year_id);
+        $logoSrc = $this->getLogoBase64();
+        $signatureSrc = $this->getSignatureBase64();
+
+        if ($request->filled('student_identity')) {
+            // SINGLE STUDENT MODE
+            $student = $this->findStudent($request);
+            if (!$student) {
+                return back()->withErrors(['error' => 'Student not found. Please verify the Student ID or Roll number!']);
+            }
+
+            $schedules = $this->getClassSchedules($student->class_id, $student->branch_id);
+            $topMarks = $this->getClassTopMarks($request->session_year_id, $student->class_id, $exam->id);
+            $totalClassStudents = $this->getTotalClassStudents($student->class_id, $request->session_year_id);
+            $meritMap = $this->getClassMeritMap($request->session_year_id, $student->class_id, $exam->id);
+
+            $report = $this->buildSingleReportData(
+                $student,
+                $exam,
+                $sessionYear,
+                $schedules,
+                $topMarks,
+                $totalClassStudents,
+                $logoSrc,
+                $signatureSrc,
+                $meritMap
+            );
+
+            if (!$report) {
+                return back()->withErrors(['error' => 'No marks entered for this student in the selected exam and session.']);
+            }
+
+            $data = array_merge([
+                'reports' => [$report],
+            ], self::getFontPaths());
+
+            $pdf = PDF::setPaper('a4', 'portrait')
+                ->loadView('pages.results.marksheet_single_pdf', $data);
+            return $pdf->stream('Progress_Report_' . $student->student_identity . '.pdf');
+        } else {
+            // BULK CLASS MODE
+            $class = Classes::findOrFail($request->class_id);
+
+            $selectedSection = null;
+            if ($request->filled('section_id') && $request->section_id !== 'all') {
+                $selectedSection = Section::find($request->section_id);
+            }
+
+            $students = Student::with(['schoolClass', 'branch', 'section', 'shift', 'sessionYear'])
+                ->where('class_id', $class->id)
+                ->where('session_year_id', $request->session_year_id)
+                ->when($request->filled('branch_id'), fn($q) => $q->where('branch_id', $request->branch_id))
+                ->when($selectedSection, fn($q) => $q->where('section_id', $selectedSection->id))
+                ->orderByRaw('CAST(roll_number AS UNSIGNED) ASC')
+                ->orderBy('student_identity', 'asc')
+                ->get();
+
+            if ($students->isEmpty()) {
+                $sectionName = $selectedSection ? " ({$selectedSection->section_name})" : "";
+                return back()->withErrors(['error' => "No students found in {$class->class_name}{$sectionName} for this academic session."]);
+            }
+
+            $firstBranchId = $students->first()->branch_id ?? null;
+            $schedules = $this->getClassSchedules($class->id, $firstBranchId);
+            $topMarks = $this->getClassTopMarks($request->session_year_id, $class->id, $exam->id);
+            $totalClassStudents = $students->count();
+            $meritMap = $this->getClassMeritMap($request->session_year_id, $class->id, $exam->id);
+
+            $reports = [];
+            foreach ($students as $student) {
+                $report = $this->buildSingleReportData(
+                    $student,
+                    $exam,
+                    $sessionYear,
+                    $schedules,
+                    $topMarks,
+                    $totalClassStudents,
+                    $logoSrc,
+                    $signatureSrc,
+                    $meritMap
+                );
+                if ($report) {
+                    $reports[] = $report;
+                }
+            }
+
+            if (empty($reports)) {
+                return back()->withErrors(['error' => "No marks found for any students in {$class->class_name} for {$exam->name}."]);
+            }
+
+            $data = array_merge([
+                'reports' => $reports,
+            ], self::getFontPaths());
+
+            $pdf = PDF::setPaper('a4', 'portrait')
+                ->loadView('pages.results.marksheet_single_pdf', $data);
+            $sectionSuffix = !empty($selectedSection) ? '_' . str_replace(' ', '_', $selectedSection->section_name) : '';
+            return $pdf->stream('Bulk_Progress_Reports_' . str_replace(' ', '_', $class->class_name) . $sectionSuffix . '_' . str_replace(' ', '_', $exam->name) . '.pdf');
+        }
+    }
+
+    /**
+     * Build single student report data package
+     */
+    protected function buildSingleReportData($student, $exam, $sessionYear, $schedules, $topMarks, $totalClassStudents, $logoSrc, $signatureSrc, $precomputedMeritMap = null)
+    {
+        $marks = Mark::with('subject')
+            ->where('student_id', $student->id)
+            ->where('exam_id', $exam->id)
+            ->where('session_year_id', $sessionYear->id)
+            ->whereHas('subject')
+            ->get();
+
+        if ($marks->isEmpty()) {
+            return null;
+        }
+
+        $subjectResults = [];
+        $totalMarks = 0;
+        $totalGradePoints = 0;
+        $hasFailed = false;
+
+        foreach ($marks as $mark) {
+            $subId = $mark->subject_id;
+            $fullMarks = isset($schedules[$subId]) ? (float)$schedules[$subId]->full_marks : 100.00;
+            if ($fullMarks <= 0) $fullMarks = 100.00;
+
+            $total = (float)$mark->total_mark;
+            $gradeInfo = $this->getGradeAndPoint($total, $fullMarks);
+
+            if ($gradeInfo['grade'] === 'F') {
+                $hasFailed = true;
+            }
+
+            $subjectResults[] = [
+                'subject_name'  => self::formatSubjectName($mark->subject->subject_name),
+                'subject_code'  => $mark->subject->subject_code ?? '',
+                'full_marks'    => (int)$fullMarks,
+                'ct_mark'       => (float)$mark->ct_mark,
+                'mcq_mark'      => (float)$mark->mcq_mark,
+                'written_mark'  => (float)$mark->written_mark,
+                'total_mark'    => $total,
+                'letter_grade'  => $gradeInfo['grade'],
+                'grade_point'   => $gradeInfo['point'],
+                'top_mark'      => (float)($topMarks[$subId] ?? $total),
+            ];
+
+            $totalMarks += $total;
+            $totalGradePoints += $gradeInfo['point'];
+        }
+
+        // Ensure S.B.A is present in the report if not already entered in student's marks
+        $existingSubIds = $marks->pluck('subject_id')->toArray();
+        $sbaSubject = null;
+        $sbaSchedule = null;
+        if (isset($schedules)) {
+            foreach ($schedules as $sSubId => $sch) {
+                $schSub = $sch->subject ?? \App\Models\Subject::find($sSubId);
+                if ($schSub && stripos($schSub->subject_name, 'S.B.A') !== false) {
+                    $sbaSubject = $schSub;
+                    $sbaSchedule = $sch;
+                    break;
+                }
+            }
+        }
+        if (!$sbaSubject) {
+            $sbaSubject = \App\Models\Subject::where('class_id', $student->class_id)
+                ->where('subject_name', 'like', '%S.B.A%')
+                ->first();
+        }
+
+        if ($sbaSubject && !in_array($sbaSubject->id, $existingSubIds)) {
+            $fullMarks = $sbaSchedule && $sbaSchedule->full_marks > 0 ? (float)$sbaSchedule->full_marks : 100.00;
+            $subjectResults[] = [
+                'subject_name'  => self::formatSubjectName($sbaSubject->subject_name),
+                'subject_code'  => $sbaSubject->subject_code ?? '',
+                'full_marks'    => (int)$fullMarks,
+                'ct_mark'       => 0.0,
+                'mcq_mark'      => 0.0,
+                'written_mark'  => 0.0,
+                'total_mark'    => 0.0,
+                'letter_grade'  => '-',
+                'grade_point'   => 0.0,
+                'top_mark'      => (float)($topMarks[$sbaSubject->id] ?? 0.0),
+            ];
+        }
+
+        $gradedSubjects = array_filter($subjectResults, fn($r) => $r['letter_grade'] !== '-');
+        $subjectCount = count($gradedSubjects);
+        $cgpa = (!$hasFailed && $subjectCount > 0) ? round($totalGradePoints / $subjectCount, 2) : 0.00;
+        $finalGrade = $hasFailed ? 'F' : $this->getFinalGrade($cgpa);
+        $remark = $this->getRemark($cgpa, $hasFailed);
+
+        $meritPosition = $this->calculateMeritPositions(
+            $sessionYear->id,
+            $student->branch_id,
+            $student->class_id,
+            $exam->id,
+            $student->id,
+            $student->section_id,
+            $student->shift_id,
+            $precomputedMeritMap
+        );
+
+        $attendance = $this->getAttendanceForStudent($student->id, $sessionYear->id);
+        $photoSrc = $this->getPhotoBase64($student);
+
+        return [
+            'student'            => $student,
+            'exam'               => $exam,
+            'sessionYear'        => $sessionYear,
+            'subjectResults'     => $subjectResults,
+            'totalMarks'         => $totalMarks,
+            'cgpa'               => $cgpa,
+            'finalGrade'         => $finalGrade,
+            'remark'             => $remark,
+            'meritPosition'      => $meritPosition,
+            'attendance'         => $attendance,
+            'totalClassStudents' => $totalClassStudents,
+            'logoSrc'            => $logoSrc,
+            'photoSrc'           => $photoSrc,
+            'signatureSrc'       => $signatureSrc,
+        ];
+    }
+
+    /**
+     * Generate Combined 3-Term Marksheet PDF (Landscape A4) - Single Student or Class Bulk
+     */
+    protected function generateCombinedMarksheet(Request $request)
+    {
+        $request->validate([
+            'session_year_id' => 'required',
+        ]);
+
+        if (!$request->filled('student_identity') && !$request->filled('class_id')) {
+            return back()->withErrors(['error' => 'Please provide a Student ID/Roll OR select a Class for bulk marksheet generation!']);
+        }
+
+        $sessionYear = SessionYear::findOrFail($request->session_year_id);
+
+        // Find the 3 terminal exams
+        $allExams = Exam::all();
+        $exam1 = $allExams->first(fn($e) => stripos($e->name, '1st') !== false && stripos($e->name, 'term') !== false)
+            ?? $allExams->first(fn($e) => stripos($e->name, '1st') !== false);
+        $exam2 = $allExams->first(fn($e) => stripos($e->name, '2nd') !== false && stripos($e->name, 'term') !== false)
+            ?? $allExams->first(fn($e) => stripos($e->name, '2nd') !== false);
+        $exam3 = $allExams->first(fn($e) => stripos($e->name, 'annual') !== false || stripos($e->name, '3rd') !== false)
+            ?? $allExams->first(fn($e) => stripos($e->name, 'final') !== false);
+
+        if (!$exam1) $exam1 = $allExams->get(0);
+        if (!$exam2) $exam2 = $allExams->get(1);
+        if (!$exam3) $exam3 = $allExams->get(2);
+
+        $exam1Id = $exam1 ? $exam1->id : 0;
+        $exam2Id = $exam2 ? $exam2->id : 0;
+        $exam3Id = $exam3 ? $exam3->id : 0;
+
+        $logoSrc = $this->getLogoBase64();
+        $signatureSrc = $this->getSignatureBase64();
+
+        if ($request->filled('student_identity')) {
+            // SINGLE STUDENT MODE
+            $student = $this->findStudent($request);
+            if (!$student) {
+                return back()->withErrors(['error' => 'Student not found. Please check Student ID or Roll number!']);
+            }
+
+            $schedules = $this->getClassSchedules($student->class_id, $student->branch_id);
+            $topMarksTerm3 = $this->getClassTopMarks($request->session_year_id, $student->class_id, $exam3Id);
+            $combinedTopMarks = $this->getClassCombinedTopMarks($request->session_year_id, $student->class_id, array_filter([$exam1Id, $exam2Id, $exam3Id]));
+            $totalClassStudents = $this->getTotalClassStudents($student->class_id, $request->session_year_id);
+
+            $meritMaps = [
+                $exam1Id => $this->getClassMeritMap($request->session_year_id, $student->class_id, $exam1Id),
+                $exam2Id => $this->getClassMeritMap($request->session_year_id, $student->class_id, $exam2Id),
+                $exam3Id => $this->getClassMeritMap($request->session_year_id, $student->class_id, $exam3Id),
+            ];
+
+            $report = $this->buildCombinedReportData(
+                $student,
+                $sessionYear,
+                $exam1,
+                $exam2,
+                $exam3,
+                $schedules,
+                $topMarksTerm3,
+                $combinedTopMarks,
+                $totalClassStudents,
+                $logoSrc,
+                $signatureSrc,
+                $meritMaps
+            );
+
+            if (!$report) {
+                return back()->withErrors(['error' => 'No marks found for this student across terms in the selected session.']);
+            }
+
+            $data = array_merge([
+                'reports' => [$report],
+            ], self::getFontPaths());
+
+            $pdf = PDF::loadView('pages.results.marksheet_combined_pdf', $data)->setPaper('a4', 'landscape');
+            return $pdf->stream('Progress_Report_Combined_' . $student->student_identity . '.pdf');
+        } else {
+            // BULK CLASS MODE
+            $class = Classes::findOrFail($request->class_id);
+
+            $selectedSection = null;
+            if ($request->filled('section_id') && $request->section_id !== 'all') {
+                $selectedSection = Section::find($request->section_id);
+            }
+
+            $students = Student::with(['schoolClass', 'branch', 'section', 'shift', 'sessionYear'])
+                ->where('class_id', $class->id)
+                ->where('session_year_id', $request->session_year_id)
+                ->when($request->filled('branch_id'), fn($q) => $q->where('branch_id', $request->branch_id))
+                ->when($selectedSection, fn($q) => $q->where('section_id', $selectedSection->id))
+                ->orderByRaw('CAST(roll_number AS UNSIGNED) ASC')
+                ->orderBy('student_identity', 'asc')
+                ->get();
+
+            if ($students->isEmpty()) {
+                $sectionName = $selectedSection ? " ({$selectedSection->section_name})" : "";
+                return back()->withErrors(['error' => "No students found in {$class->class_name}{$sectionName} for this academic session."]);
+            }
+
+            $firstBranchId = $students->first()->branch_id ?? null;
+            $schedules = $this->getClassSchedules($class->id, $firstBranchId);
+            $topMarksTerm3 = $this->getClassTopMarks($request->session_year_id, $class->id, $exam3Id);
+            $combinedTopMarks = $this->getClassCombinedTopMarks($request->session_year_id, $class->id, array_filter([$exam1Id, $exam2Id, $exam3Id]));
+            $totalClassStudents = $students->count();
+
+            $meritMaps = [
+                $exam1Id => $this->getClassMeritMap($request->session_year_id, $class->id, $exam1Id),
+                $exam2Id => $this->getClassMeritMap($request->session_year_id, $class->id, $exam2Id),
+                $exam3Id => $this->getClassMeritMap($request->session_year_id, $class->id, $exam3Id),
+            ];
+
+            $reports = [];
+            foreach ($students as $student) {
+                $report = $this->buildCombinedReportData(
+                    $student,
+                    $sessionYear,
+                    $exam1,
+                    $exam2,
+                    $exam3,
+                    $schedules,
+                    $topMarksTerm3,
+                    $combinedTopMarks,
+                    $totalClassStudents,
+                    $logoSrc,
+                    $signatureSrc,
+                    $meritMaps
+                );
+                if ($report) {
+                    $reports[] = $report;
+                }
+            }
+
+            if (empty($reports)) {
+                return back()->withErrors(['error' => "No marks found across terms for students in {$class->class_name}."]);
+            }
+
+            $data = array_merge([
+                'reports' => $reports,
+            ], self::getFontPaths());
+
+            $pdf = PDF::loadView('pages.results.marksheet_combined_pdf', $data)->setPaper('a4', 'landscape');
+            $sectionSuffix = !empty($selectedSection) ? '_' . str_replace(' ', '_', $selectedSection->section_name) : '';
+            return $pdf->stream('Bulk_Combined_Reports_' . str_replace(' ', '_', $class->class_name) . $sectionSuffix . '_' . str_replace(' ', '_', $sessionYear->session_name) . '.pdf');
+        }
+    }
+
+    /**
+     * Build combined 3-term student report data package
+     */
+    protected function buildCombinedReportData($student, $sessionYear, $exam1, $exam2, $exam3, $schedules, $topMarksTerm3, $combinedTopMarks, $totalClassStudents, $logoSrc, $signatureSrc, array $meritMaps = [])
+    {
+        $exam1Id = $exam1 ? $exam1->id : 0;
+        $exam2Id = $exam2 ? $exam2->id : 0;
+        $exam3Id = $exam3 ? $exam3->id : 0;
+
+        $allStudentMarks = Mark::with('subject')
+            ->where('student_id', $student->id)
+            ->where('session_year_id', $sessionYear->id)
+            ->whereHas('subject')
+            ->get();
+
+        if ($allStudentMarks->isEmpty()) {
+            return null;
+        }
+
+        $marks1 = $allStudentMarks->where('exam_id', $exam1Id)->keyBy('subject_id');
+        $marks2 = $allStudentMarks->where('exam_id', $exam2Id)->keyBy('subject_id');
+        $marks3 = $allStudentMarks->where('exam_id', $exam3Id)->keyBy('subject_id');
+
+        $subjectIds = $allStudentMarks->pluck('subject_id')->unique();
+        // Also ensure S.B.A is present in subjects list if scheduled for class
+        if (isset($schedules)) {
+            foreach ($schedules as $sSubId => $sch) {
+                $schSub = $sch->subject ?? \App\Models\Subject::find($sSubId);
+                if ($schSub && stripos($schSub->subject_name, 'S.B.A') !== false) {
+                    if (!$subjectIds->contains($sSubId)) {
+                        $subjectIds->push($sSubId);
+                    }
+                }
+            }
+        }
+        $subjects = \App\Models\Subject::whereIn('id', $subjectIds)->get()->keyBy('id');
+
+        $combinedSubjectResults = [];
+        $grandTotalMarks = 0;
+        $totalGradePoints = 0;
+        $hasFailed = false;
+
+        foreach ($subjects as $subId => $subject) {
+            $m1 = $marks1->get($subId);
+            $m2 = $marks2->get($subId);
+            $m3 = $marks3->get($subId);
+
+            $fullMark = isset($schedules[$subId]) ? (float)$schedules[$subId]->full_marks : 100.00;
+            if ($fullMark <= 0) $fullMark = 100.00;
+
+            $t1_total = $m1 ? (float)$m1->total_mark : 0.00;
+            $t2_total = $m2 ? (float)$m2->total_mark : 0.00;
+            $t3_total = $m3 ? (float)$m3->total_mark : 0.00;
+
+            $term3Grade = $this->getGradeAndPoint($t3_total, $fullMark);
+
+            $finalTotal = $t1_total + $t2_total + $t3_total;
+            $finalFullMarks = $fullMark * 3;
+            $finalGradeInfo = $this->getGradeAndPoint($finalTotal, $finalFullMarks);
+
+            $hasAnyMarks = ($m1 !== null || $m2 !== null || $m3 !== null);
+            if ($hasAnyMarks && $finalGradeInfo['grade'] === 'F') {
+                $hasFailed = true;
+            }
+
+            $combinedSubjectResults[] = [
+                'subject_name' => self::formatSubjectName($subject->subject_name),
+                'full_marks'   => (int)$fullMark,
+                'term1' => [
+                    'ct'       => $m1 ? (float)$m1->ct_mark : 0.00,
+                    'mt'       => $m1 ? (float)$m1->mcq_mark : 0.00,
+                    'terminal' => $m1 ? (float)$m1->written_mark : 0.00,
+                    'total'    => $t1_total,
+                ],
+                'term2' => [
+                    'ct'       => $m2 ? (float)$m2->ct_mark : 0.00,
+                    'mt'       => $m2 ? (float)$m2->mcq_mark : 0.00,
+                    'terminal' => $m2 ? (float)$m2->written_mark : 0.00,
+                    'total'    => $t2_total,
+                ],
+                'term3' => [
+                    'ct'           => $m3 ? (float)$m3->ct_mark : 0.00,
+                    'mt'           => $m3 ? (float)$m3->mcq_mark : 0.00,
+                    'terminal'     => $m3 ? (float)$m3->written_mark : 0.00,
+                    'total'        => $t3_total,
+                    'letter_grade' => $term3Grade['grade'],
+                    'grade_point'  => $term3Grade['point'],
+                    'top_mark'     => (float)($topMarksTerm3[$subId] ?? $t3_total),
+                ],
+                'final' => [
+                    'total'        => $finalTotal,
+                    'letter_grade' => $finalGradeInfo['grade'],
+                    'grade_point'  => $finalGradeInfo['point'],
+                    'top_mark'     => (float)($combinedTopMarks[$subId] ?? $finalTotal),
+                ],
+            ];
+
+            $grandTotalMarks += $finalTotal;
+            $totalGradePoints += $finalGradeInfo['point'];
+        }
+
+        $subjectCount = count($combinedSubjectResults);
+        $cgpa = (!$hasFailed && $subjectCount > 0) ? round($totalGradePoints / $subjectCount, 2) : 0.00;
+        $finalGrade = $hasFailed ? 'F' : $this->getFinalGrade($cgpa);
+        $remark = $this->getRemark($cgpa, $hasFailed);
+
+        $examMerits = [];
+        $activeTerms = [
+            ['exam' => $exam3, 'id' => $exam3Id],
+            ['exam' => $exam2, 'id' => $exam2Id],
+            ['exam' => $exam1, 'id' => $exam1Id],
+        ];
+
+        foreach ($activeTerms as $t) {
+            if (!$t['exam']) continue;
+            $termMeritMap = $meritMaps[$t['id']] ?? null;
+            $pos = $this->calculateMeritPositions(
+                $sessionYear->id,
+                $student->branch_id,
+                $student->class_id,
+                $t['id'],
+                $student->id,
+                $student->section_id,
+                $student->shift_id,
+                $termMeritMap
+            );
+            $examMerits[] = [
+                'exam_name'    => $t['exam']->name,
+                'section_wise' => $pos['section_wise'],
+                'shift_wise'   => $pos['shift_wise'],
+                'class_wise'   => $pos['class_wise'],
+                'working_days' => '',
+                'present'      => '',
+                'absent'       => '',
+            ];
+        }
+
+        $photoSrc = $this->getPhotoBase64($student);
+
+        return [
+            'student'                => $student,
+            'sessionYear'            => $sessionYear,
+            'finalExamName'          => $exam3 ? $exam3->name : 'Annual Exam',
+            'combinedSubjectResults' => $combinedSubjectResults,
+            'grandTotalMarks'        => $grandTotalMarks,
+            'cgpa'                   => $cgpa,
+            'finalGrade'             => $finalGrade,
+            'remark'                 => $remark,
+            'examMerits'             => $examMerits,
+            'totalClassStudents'     => $totalClassStudents,
+            'logoSrc'                => $logoSrc,
+            'photoSrc'               => $photoSrc,
+            'signatureSrc'           => $signatureSrc,
+        ];
+    }
+
+    /**
+     * Helpers for Class Schedules & Top Marks
+     */
+    protected function getClassSchedules($classId, $branchId = null)
+    {
+        $schedules = ExamSchedule::where('class_id', $classId)
+            ->when($branchId, fn($q) => $q->where('branch_id', $branchId))
+            ->get()
+            ->keyBy('subject_id');
+
+        if ($schedules->isEmpty()) {
+            $schedules = ExamSchedule::where('class_id', $classId)->get()->keyBy('subject_id');
+        }
+
+        return $schedules;
+    }
+
+    protected function getClassTopMarks($sessionYearId, $classId, $examId)
+    {
+        return Mark::where('session_year_id', $sessionYearId)
+            ->where('class_id', $classId)
+            ->where('exam_id', $examId)
+            ->whereHas('subject')
+            ->groupBy('subject_id')
+            ->selectRaw('subject_id, MAX(total_mark) as top_mark')
+            ->pluck('top_mark', 'subject_id');
+    }
+
+    protected function getClassCombinedTopMarks($sessionYearId, $classId, array $examIds)
+    {
+        return Mark::where('session_year_id', $sessionYearId)
+            ->where('class_id', $classId)
+            ->whereIn('exam_id', array_filter($examIds))
+            ->whereHas('subject')
+            ->groupBy('student_id', 'subject_id')
+            ->selectRaw('subject_id, SUM(total_mark) as sum_total')
+            ->get()
+            ->groupBy('subject_id')
+            ->map(fn($group) => $group->max('sum_total'));
+    }
+
+    protected function getTotalClassStudents($classId, $sessionYearId)
+    {
+        return Student::where('class_id', $classId)
+            ->where('session_year_id', $sessionYearId)
+            ->count();
+    }
+
+    /**
+     * Locate student by ID, Identity, or Class + Roll
+     */
+    protected function findStudent(Request $request)
+    {
+        return Student::with(['schoolClass', 'branch', 'section', 'shift', 'sessionYear'])
+            ->where(function ($q) use ($request) {
+                $q->where('student_identity', $request->student_identity)
+                    ->orWhere('id', $request->student_identity);
+                if ($request->filled('class_id')) {
+                    $q->orWhere(function ($sub) use ($request) {
+                        $sub->where('class_id', $request->class_id)
+                            ->when($request->filled('section_id') && $request->section_id !== 'all', fn($sq) => $sq->where('section_id', $request->section_id))
+                            ->where('roll_number', (string)$request->student_identity);
+                    });
+                }
+            })
+            ->first();
+    }
+
+    /**
+     * Convert obtained marks to standard Grade and Grade Point
+     */
+    protected function getGradeAndPoint($obtainedMarks, $fullMarks)
+    {
+        if ($fullMarks <= 0) $fullMarks = 100.00;
+        $pct = ($obtainedMarks / $fullMarks) * 100;
+
+        if ($pct >= 80) return ['grade' => 'A+', 'point' => 5.0, 'comment' => 'Excellent'];
+        if ($pct >= 70) return ['grade' => 'A',  'point' => 4.0, 'comment' => 'Very Good'];
+        if ($pct >= 60) return ['grade' => 'A-', 'point' => 3.5, 'comment' => 'Good'];
+        if ($pct >= 50) return ['grade' => 'B',  'point' => 3.0, 'comment' => 'Average'];
+        if ($pct >= 40) return ['grade' => 'C',  'point' => 2.0, 'comment' => 'Poor'];
+        if ($pct >= 33) return ['grade' => 'D',  'point' => 1.0, 'comment' => 'Very Poor'];
+        return ['grade' => 'F', 'point' => 0.0, 'comment' => 'Fail'];
+    }
+
+    /**
+     * Convert GPA to Letter Grade
+     */
+    private function getFinalGrade($cgpa)
+    {
+        if ($cgpa >= 5.0) return 'A+';
+        if ($cgpa >= 4.0) return 'A';
+        if ($cgpa >= 3.5) return 'A-';
+        if ($cgpa >= 3.0) return 'B';
+        if ($cgpa >= 2.0) return 'C';
+        if ($cgpa >= 1.0) return 'D';
+        return 'F';
+    }
+
+    /**
+     * Generate Comment / Remark based on GPA
+     */
+    protected function getRemark($gpa, $isFailed)
+    {
+        if ($isFailed || $gpa == 0) return 'Fail';
+        if ($gpa >= 5.0) return 'Excellent';
+        if ($gpa >= 4.0) return 'Very Good';
+        if ($gpa >= 3.5) return 'Good';
+        if ($gpa >= 3.0) return 'Average';
+        if ($gpa >= 2.0) return 'Poor';
+        return 'Very Poor';
+    }
+
+    /**
+     * Precompute Section-wise, Shift-wise, and Class-wise merit ranks map for all students in a class
+     */
+    protected function getClassMeritMap($sessionYearId, $classId, $examId)
+    {
+        if (!$examId || !$classId || !$sessionYearId) {
+            return [];
+        }
+
+        $allMarks = Mark::where('session_year_id', $sessionYearId)
+            ->where('class_id', $classId)
+            ->where('exam_id', $examId)
+            ->whereHas('subject')
+            ->get();
+
+        if ($allMarks->isEmpty()) {
+            return [];
+        }
+
+        $students = Student::where('class_id', $classId)
+            ->where('session_year_id', $sessionYearId)
+            ->get();
+
+        $scores = [];
+        foreach ($students as $st) {
+            $stMarks = $allMarks->where('student_id', $st->id);
+            if ($stMarks->isEmpty()) continue;
+
+            $total = $stMarks->sum('total_mark');
+            $points = $stMarks->sum('grade_point');
+            $count = $stMarks->count();
+            $failed = $stMarks->contains(fn($m) => $m->letter_grade === 'F' || $m->letter_grade === 'Fail');
+
+            $gpa = (!$failed && $count > 0) ? ($points / $count) : 0.00;
+
+            $scores[] = [
+                'student_id' => $st->id,
+                'section_id' => $st->section_id,
+                'shift_id'   => $st->shift_id,
+                'failed'     => $failed,
+                'gpa'        => $gpa,
+                'total'      => $total,
+            ];
+        }
+
+        // Sort descending: Passed first, then GPA first, then Total marks
+        usort($scores, function ($a, $b) {
+            $aFail = ($a['failed'] ?? false);
+            $bFail = ($b['failed'] ?? false);
+            if ($aFail !== $bFail) {
+                return $aFail ? 1 : -1;
+            }
+            if ($a['gpa'] == $b['gpa']) {
+                return $b['total'] <=> $a['total'];
+            }
+            return $b['gpa'] <=> $a['gpa'];
+        });
+
+        $merits = [];
+        $currentClassRank = 0;
+        $prevClassScore = null;
+
+        $secRanks = [];
+        $prevSecScores = [];
+
+        $shiftRanks = [];
+        $prevShiftScores = [];
+
+        foreach ($scores as $s) {
+            $secId = $s['section_id'] ?? 0;
+            $shId = $s['shift_id'] ?? 0;
+            $scoreKey = ($s['failed'] ? 'FAIL_' : 'PASS_') . ((float)$s['gpa']) . '_' . ((float)$s['total']);
+
+            // Class-wise Dense Rank
+            if ($scoreKey !== $prevClassScore) {
+                $currentClassRank++;
+                $prevClassScore = $scoreKey;
+            }
+
+            // Section-wise Dense Rank
+            if (!isset($secRanks[$secId])) {
+                $secRanks[$secId] = 1;
+                $prevSecScores[$secId] = $scoreKey;
+            } elseif ($scoreKey !== $prevSecScores[$secId]) {
+                $secRanks[$secId]++;
+                $prevSecScores[$secId] = $scoreKey;
+            }
+
+            // Shift-wise Dense Rank
+            if (!isset($shiftRanks[$shId])) {
+                $shiftRanks[$shId] = 1;
+                $prevShiftScores[$shId] = $scoreKey;
+            } elseif ($scoreKey !== $prevShiftScores[$shId]) {
+                $shiftRanks[$shId]++;
+                $prevShiftScores[$shId] = $scoreKey;
+            }
+
+            $merits[$s['student_id']] = [
+                'class_wise'   => $currentClassRank,
+                'section_wise' => $secRanks[$secId],
+                'shift_wise'   => $shiftRanks[$shId],
+            ];
+        }
+
+        return $merits;
+    }
+
+    /**
+     * Compute Section-wise, Shift-wise, and Class-wise merit ranks
+     */
+    protected function calculateMeritPositions($sessionYearId, $branchId, $classId, $examId, $studentId, $sectionId, $shiftId, $precomputedMap = null)
+    {
+        if ($precomputedMap !== null) {
+            return $precomputedMap[$studentId] ?? ['class_wise' => '-', 'section_wise' => '-', 'shift_wise' => '-'];
+        }
+
+        $map = $this->getClassMeritMap($sessionYearId, $classId, $examId);
+        return $map[$studentId] ?? ['class_wise' => '-', 'section_wise' => '-', 'shift_wise' => '-'];
+    }
+
+    /**
+     * Fetch Attendance counts for student (Temporarily kept blank as attendance is not fully maintained)
+     */
+    protected function getAttendanceForStudent($studentId, $sessionYearId)
+    {
+        return [
+            'working_days' => '',
+            'present'      => '',
+            'absent'       => '',
+        ];
+    }
+
+    /**
+     * Base64 helpers for Logo, Photo, Signature
+     */
+    protected function getLogoBase64()
+    {
+        $logoPath = public_path('img/macs_logo.jpeg');
+        if (file_exists($logoPath)) {
+            return str_replace('\\', '/', $logoPath);
+        }
+        $fallbackPng = public_path('img/logo.png');
+        if (file_exists($fallbackPng)) {
+            return str_replace('\\', '/', $fallbackPng);
+        }
+        return '';
+    }
+
+    protected function getPhotoBase64($student)
+    {
+        if (!empty($student->photo)) {
+            $path = public_path($student->photo);
+            if (file_exists($path) && is_file($path)) {
+                return str_replace('\\', '/', $path);
+            }
+        }
+
+        $isFemale = isset($student->gender) && strtolower($student->gender) === 'female';
+        $thumbName = $isFemale ? 'img/girl_thumb.png' : 'img/boy_thumb.png';
+        $fallbackName = $isFemale ? 'img/girl.png' : 'img/boy.png';
+
+        if (file_exists(public_path($thumbName))) {
+            return str_replace('\\', '/', public_path($thumbName));
+        }
+        if (file_exists(public_path($fallbackName))) {
+            return str_replace('\\', '/', public_path($fallbackName));
+        }
+        $defaultThumb = public_path('img/boy_thumb.png');
+        if (file_exists($defaultThumb)) {
+            return str_replace('\\', '/', $defaultThumb);
+        }
+        $default = public_path('img/boy.png');
+        if (file_exists($default)) {
+            return str_replace('\\', '/', $default);
+        }
+        return '';
+    }
+
+    protected function getSignatureBase64()
+    {
+        $path = public_path('img/signature.png');
+        if (file_exists($path)) {
+            return str_replace('\\', '/', $path);
+        }
+        return '';
+    }
+
+    // Tabulation sheet search page
+    public function tabulationIndex()
+    {
+        $sessions = SessionYear::orderBy('session_name', 'desc')->get();
+        $branches = Branch::all();
+        $exams = Exam::orderBy('name', 'asc')->get();
+        $classes = Classes::all();
+
+        // Get sections mapped per class where students exist
+        $classSections = Student::select('class_id', 'section_id')
+            ->whereNotNull('section_id')
+            ->distinct()
+            ->with('section:id,section_name')
+            ->get()
+            ->groupBy('class_id')
+            ->map(function ($items) {
+                return $items->pluck('section')->filter()->unique('id')->values();
+            });
+
+        return view('pages.results.tabulation_index', compact('sessions', 'branches', 'exams', 'classes', 'classSections'));
+    }
+
+    // Tabulation sheet PDF generation logic
+    public function tabulationGenerate(Request $request)
+    {
+        ini_set('memory_limit', '512M');
+        ini_set('max_execution_time', '300');
+
+        $request->validate([
+            'session_year_id' => 'required',
+            'branch_id'       => 'required',
+            'exam_id'         => 'required',
+            'class_id'        => 'required',
+            'section_id'      => 'nullable',
+            'sort_by'         => 'nullable|in:roll,merit',
+        ]);
+
+        $exam = Exam::find($request->exam_id);
+        $schoolClass = Classes::find($request->class_id);
+        $branch = Branch::find($request->branch_id);
+
+        $schedules = ExamSchedule::with('subject')
+            ->where('class_id', $schoolClass->id)
+            ->when($branch, fn($q) => $q->where('branch_id', $branch->id))
+            ->where('exam_id', $exam->id)
+            ->get()
+            ->unique('subject_id')
+            ->values();
+
+        if ($schedules->isEmpty()) {
+            $schedules = ExamSchedule::with('subject')
+                ->where('class_id', $schoolClass->id)
+                ->get()
+                ->unique('subject_id')
+                ->values();
+        }
+
+        $allMarks = Mark::where('session_year_id', $request->session_year_id)
+            ->where('branch_id', $branch->id)
+            ->where('exam_id', $exam->id)
+            ->where('class_id', $schoolClass->id)
+            ->whereHas('subject')
+            ->get();
+
+        // Check if any subjects with marks are missing from schedules
+        $markSubjectIds = $allMarks->pluck('subject_id')->unique();
+        $existingSubjectIds = $schedules->pluck('subject_id')->toArray();
+        $missingSubjectIds = $markSubjectIds->diff($existingSubjectIds);
+
+        if ($missingSubjectIds->isNotEmpty()) {
+            $extraSubjects = \App\Models\Subject::whereIn('id', $missingSubjectIds)->get();
+            foreach ($extraSubjects as $extraSub) {
+                $schedules->push((object)[
+                    'subject_id' => $extraSub->id,
+                    'subject'    => $extraSub,
+                    'full_marks' => 100,
+                ]);
+            }
+        }
+
+        // Ensure S.B.A subject is always present for classes having S.B.A
+        $sbaSubject = \App\Models\Subject::where('class_id', $schoolClass->id)
+            ->where('subject_name', 'like', '%S.B.A%')
+            ->first();
+        if ($sbaSubject && !in_array($sbaSubject->id, $schedules->pluck('subject_id')->toArray())) {
+            $schedules->push((object)[
+                'subject_id' => $sbaSubject->id,
+                'subject'    => $sbaSubject,
+                'full_marks' => 100,
+            ]);
+        }
+
+        if ($schedules->isEmpty()) {
+            return back()->withErrors(['error' => 'No subjects found for this class in Exam Subject Setup.']);
+        }
+
+        // Filter marks strictly to subjects present in schedules/sheet
+        $validSubjectIds = $schedules->pluck('subject_id')->filter()->toArray();
+        $allMarks = $allMarks->whereIn('subject_id', $validSubjectIds);
+
+        $selectedSection = null;
+        if ($request->filled('section_id') && $request->section_id !== 'all') {
+            $selectedSection = Section::find($request->section_id);
+        }
+
+        $studentsQuery = Student::where('session_year_id', $request->session_year_id)
+            ->where('branch_id', $branch->id)
+            ->where('class_id', $schoolClass->id);
+
+        if ($selectedSection) {
+            $studentsQuery->where('section_id', $selectedSection->id);
+        }
+
+        $students = $studentsQuery->get();
+
+        if ($students->isEmpty()) {
+            $msg = $selectedSection
+                ? 'No students found for this class and ' . $selectedSection->section_name . '.'
+                : 'No students found for this class in the selected session and branch.';
+            return back()->withErrors(['error' => $msg]);
+        }
+
+        $studentData = [];
+
+        foreach ($students as $student) {
+            $studentMarks = $allMarks->where('student_id', $student->id);
+            $grandTotal = $studentMarks->sum('total_mark');
+            $totalGradePoints = $studentMarks->sum('grade_point');
+            $subjectCount = $studentMarks->count();
+
+            $is_failed = $studentMarks->contains(function ($m) {
+                return $m->letter_grade == 'F' || $m->letter_grade == 'Fail';
+            });
+
+            $cgpa = 0.00;
+            if (!$is_failed && $subjectCount > 0) {
+                $cgpa = number_format($totalGradePoints / $subjectCount, 2);
+            }
+            $finalGrade = $is_failed ? 'F' : $this->getFinalGrade($cgpa);
+
+            $studentData[] = (object)[
+                'student'     => $student,
+                'marks'       => $studentMarks->keyBy('subject_id'),
+                'grand_total' => $grandTotal,
+                'cgpa'        => $is_failed ? '0.00' : $cgpa,
+                'final_grade' => $finalGrade
+            ];
+        }
+
+        // Sort by merit first to establish accurate merit positions
+        usort($studentData, function ($a, $b) {
+            $aFail = ($a->final_grade === 'F' || $a->final_grade === 'Fail');
+            $bFail = ($b->final_grade === 'F' || $b->final_grade === 'Fail');
+            if ($aFail !== $bFail) {
+                return $aFail ? 1 : -1;
+            }
+            if ((float)$a->cgpa == (float)$b->cgpa) {
+                return (float)$b->grand_total <=> (float)$a->grand_total;
+            }
+            return (float)$b->cgpa <=> (float)$a->cgpa;
+        });
+
+        // Assign dense merit position/rank to each student (ties get same rank: 1, 1, 2, 3...)
+        $currentRank = 0;
+        $prevScoreKey = null;
+
+        foreach ($studentData as $item) {
+            $isFailed = ($item->final_grade === 'F' || $item->final_grade === 'Fail');
+            $scoreKey = ($isFailed ? 'FAIL_' : 'PASS_') . ((float)$item->cgpa) . '_' . ((float)$item->grand_total);
+
+            if ($scoreKey !== $prevScoreKey) {
+                $currentRank++;
+                $prevScoreKey = $scoreKey;
+            }
+
+            $item->merit_rank = $currentRank;
+        }
+
+        // Apply roll wise or merit wise sorting based on filter
+        $sortBy = $request->input('sort_by', 'roll');
+        if ($sortBy === 'roll') {
+            usort($studentData, function ($a, $b) {
+                $rollA = (string)($a->student->roll_number ?? $a->student->student_identity ?? '');
+                $rollB = (string)($b->student->roll_number ?? $b->student->student_identity ?? '');
+                $cmp = strnatcmp($rollA, $rollB);
+                if ($cmp === 0) {
+                    return ($a->merit_rank ?? 0) <=> ($b->merit_rank ?? 0);
+                }
+                return $cmp;
+            });
+        } else {
+            // When sorting by merit, tied students are ordered by roll number ascending
+            usort($studentData, function ($a, $b) {
+                if ($a->merit_rank != $b->merit_rank) {
+                    return $a->merit_rank <=> $b->merit_rank;
+                }
+                $rollA = (string)($a->student->roll_number ?? $a->student->student_identity ?? '');
+                $rollB = (string)($b->student->roll_number ?? $b->student->student_identity ?? '');
+                return strnatcmp($rollA, $rollB);
+            });
+        }
+
+        $sessionYear = SessionYear::find($request->session_year_id);
+        $logoSrc = $this->getLogoBase64();
+        $signatureSrc = $this->getSignatureBase64();
+
+        // Format subject names for each schedule (using short abbreviations for compact table headers)
+        foreach ($schedules as $schedule) {
+            $schedule->formatted_subject_name = self::formatSubjectName($schedule->subject->subject_name ?? '', true);
+        }
+
+        // Dynamically compute subject chunks for multi-page layout (optimized for compact 4 columns per subject)
+        $totalSubjects = $schedules->count();
+        if ($totalSubjects <= 8) {
+            $subjectChunks = collect([$schedules]);
+        } elseif ($totalSubjects <= 14) {
+            $chunkSize = (int)ceil($totalSubjects / 2);
+            $subjectChunks = $schedules->chunk($chunkSize)->values();
+        } else {
+            $chunkSize = (int)ceil($totalSubjects / 3);
+            $subjectChunks = $schedules->chunk($chunkSize)->values();
+        }
+
+        $data = array_merge([
+            'exam'          => $exam,
+            'schoolClass'   => $schoolClass,
+            'section'       => $selectedSection,
+            'branch'        => $branch,
+            'sessionYear'   => $sessionYear,
+            'schedules'     => $schedules,
+            'subjectChunks' => $subjectChunks,
+            'totalSubjects' => $totalSubjects,
+            'studentData'   => $studentData,
+            'sortBy'        => $sortBy,
+            'logoSrc'       => $logoSrc,
+            'signatureSrc'  => $signatureSrc,
+        ], self::getFontPaths());
+
+        $pdf = PDF::loadView('pages.results.tabulation_pdf', $data)->setPaper('a4', 'landscape');
+        $sectionSuffix = !empty($selectedSection) ? '_' . str_replace(' ', '_', $selectedSection->section_name) : '';
+        return $pdf->stream('Tabulation_Sheet_' . str_replace(' ', '_', $schoolClass->class_name) . $sectionSuffix . '.pdf');
+    }
+
+    /**
+     * Helper to return absolute TrueType font paths formatted for DomPDF CSS
+     */
+    public static function getFontPaths(): array
+    {
+        return [
+            'fontInterRegular'   => str_replace('\\', '/', public_path('fonts/Inter-Regular.ttf')),
+            'fontInterSemiBold'  => str_replace('\\', '/', public_path('fonts/Inter-SemiBold.ttf')),
+            'fontInterBold'      => str_replace('\\', '/', public_path('fonts/Inter-Bold.ttf')),
+            'fontInterExtraBold' => str_replace('\\', '/', public_path('fonts/Inter-ExtraBold.ttf')),
+            'fontNotoRegular'    => str_replace('\\', '/', public_path('fonts/NotoSerifBengali-Regular.ttf')),
+            'fontNotoBold'       => str_replace('\\', '/', public_path('fonts/NotoSerifBengali-Bold.ttf')),
+        ];
+    }
+
+    /**
+     * Map database Bengali subject names to clean English titles for marksheet and tabulation rendering
+     */
+    public static function formatSubjectName(?string $name, bool $short = false): string
+    {
+        if (empty($name)) return '';
+
+        // Normalize spaces and Unicode
+        $trimmed = trim(preg_replace('/\s+/u', ' ', str_replace("\xc2\xa0", ' ', $name)));
+        // Decomposed to precomposed Bengali characters (য + ় -> য়, ড + ় -> ড়, ঢ + ় -> ঢ়)
+        $trimmed = strtr($trimmed, [
+            "\xe0\xa6\xaf\xe0\xa7\xbc" => "\xe0\xa7\x9f",
+            "\xe0\xa6\xa1\xe0\xa7\xbc" => "\xe0\xa7\x9c",
+            "\xe0\xa6\xa2\xe0\xa7\xbc" => "\xe0\xa7\x9d",
+            "\xe0\xa7\x87\xe0\xa6\xbe" => "\xe0\xa7\x8b",
+            "\xe0\xa7\x87\xe0\xa7\x97" => "\xe0\xa7\x8c",
+        ]);
+
+        if ($short) {
+            $shortMap = [
+                'বাংলা' => 'Bangla',
+                'বাংলা ১ম পত্র' => 'Bangla 1st Paper',
+                'বাংলা ২য় পত্র' => 'Bangla 2nd Paper',
+                'বাংলা ২য় পত্র' => 'Bangla 2nd Paper',
+                'ইংরেজি' => 'English',
+                'ইংরেজী' => 'English',
+                'ইংরেজি ১ম পত্র' => 'English 1st Paper',
+                'ইংরেজী ১ম পত্র' => 'English 1st Paper',
+                'ইংরেজি ২য় পত্র' => 'English 2nd Paper',
+                'ইংরেজী ২য় পত্র' => 'English 2nd Paper',
+                'গণিত' => 'Mathematics',
+                'সাধারণ গণিত' => 'Mathematics',
+                'আরবী / ধর্মশিক্ষা' => 'Arabic / Islamic',
+                'আরবি / ধর্মশিক্ষা' => 'Arabic / Islamic',
+                'আরবী' => 'Arabic',
+                'আরবি' => 'Arabic',
+                'ধর্মশিক্ষা' => 'Religious Studies',
+                'ধর্ম ও নৈতিক শিক্ষা' => 'Religious Studies',
+                'ইসলাম ও নৈতিক শিক্ষা' => 'Islamic Studies',
+                'ইসলাম শিক্ষা' => 'Islamic Studies',
+                'হিন্দু ধর্ম ও নৈতিক শিক্ষা' => 'Hindu Studies',
+                'হিন্দু ধর্ম' => 'Hindu Studies',
+                'হিন্দু শিক্ষা' => 'Hindu Studies',
+                'ইসলাম / হিন্দু শিক্ষা' => 'Islamic / Hindu',
+                'ড্রইং' => 'Drawing',
+                'সাধারণ জ্ঞান' => 'General Knowledge',
+                'সমাজ' => 'Social Studies',
+                'সামাজিক বিজ্ঞান' => 'Social Science',
+                'বিজ্ঞান' => 'General Science',
+                'সাধারণ বিজ্ঞান' => 'General Science',
+                'বাংলাদেশ ও বিশ্বপরিচয়' => 'BGS',
+                'বাংলাদেশ ও বিশ্বপরিচয়' => 'BGS',
+                'বাংলাদেশ ও বিশ্বপরিচয় / সাধারণ বিজ্ঞান' => 'BGS / Science',
+                'বাংলাদেশ ও বিশ্বপরিচয় / সাধারণ বিজ্ঞান' => 'BGS / Science',
+                'শারীরিক শিক্ষা ও স্বাস্থ্য' => 'Physical Ed.',
+                'শারীরিক শিক্ষা' => 'Physical Ed.',
+                'চারু ও কারুকলা' => 'Arts & Crafts',
+                'কর্ম ও জীবনমুখী শিক্ষা' => 'Work & Life',
+                'গার্হস্থ্য বিজ্ঞান' => 'Home Science',
+                'তথ্য ও যোগাযোগ প্রযুক্তি' => 'ICT',
+                'কৃষি শিক্ষা' => 'Agriculture',
+                'জীববিজ্ঞান / ভূগোল' => 'Biology / Geography',
+                'জীব বিজ্ঞান / ভূগোল' => 'Biology / Geography',
+                'জীববিজ্ঞান' => 'Biology',
+                'জীব বিজ্ঞান' => 'Biology',
+                'ভূগোল' => 'Geography',
+                'রসায়ন / অর্থনীতি' => 'Chemistry / Econ',
+                'রসায়ন / অর্থনীতি' => 'Chemistry / Econ',
+                'পদার্থ / ইতিহাস' => 'Physics / History',
+                'উচ্চতর গণিত / কৃষি শিক্ষা' => 'Higher Math / Agri',
+                'উচ্চতর গণিত' => 'Higher Math',
+                'S.B.A' => 'S.B.A',
+            ];
+
+            if (isset($shortMap[$trimmed])) {
+                return $shortMap[$trimmed];
+            }
+
+            // Sort keys by string length descending to match longer compound phrases before substrings
+            uksort($shortMap, fn($a, $b) => mb_strlen($b) - mb_strlen($a));
+
+            foreach ($shortMap as $bn => $en) {
+                if (mb_strpos($trimmed, $bn) !== false) {
+                    return $en;
+                }
+            }
+
+            return $trimmed;
+        }
+
+        $map = [
+            'বাংলা' => 'Bangla',
+            'বাংলা ১ম পত্র' => 'Bangla 1st Paper',
+            'বাংলা ২য় পত্র' => 'Bangla 2nd Paper',
+            'বাংলা ২য় পত্র' => 'Bangla 2nd Paper',
+            'ইংরেজি' => 'English',
+            'ইংরেজী' => 'English',
+            'ইংরেজি ১ম পত্র' => 'English 1st Paper',
+            'ইংরেজী ১ম পত্র' => 'English 1st Paper',
+            'ইংরেজি ২য় পত্র' => 'English 2nd Paper',
+            'ইংরেজী ২য় পত্র' => 'English 2nd Paper',
+            'গণিত' => 'Mathematics',
+            'সাধারণ গণিত' => 'Mathematics',
+            'আরবী / ধর্মশিক্ষা' => 'Arabic & Islamic Studies',
+            'আরবি / ধর্মশিক্ষা' => 'Arabic & Islamic Studies',
+            'আরবী' => 'Arabic',
+            'আরবি' => 'Arabic',
+            'ধর্মশিক্ষা' => 'Religious Studies',
+            'ধর্ম ও নৈতিক শিক্ষা' => 'Religious & Moral Studies',
+            'ইসলাম ও নৈতিক শিক্ষা' => 'Islamic & Moral Studies',
+            'ইসলাম শিক্ষা' => 'Islamic Studies',
+            'হিন্দু ধর্ম ও নৈতিক শিক্ষা' => 'Hindu & Moral Studies',
+            'হিন্দু ধর্ম' => 'Hindu Studies',
+            'হিন্দু শিক্ষা' => 'Hindu Studies',
+            'ইসলাম / হিন্দু শিক্ষা' => 'Islamic / Hindu Studies',
+            'ড্রইং' => 'Drawing',
+            'সাধারণ জ্ঞান' => 'General Knowledge',
+            'সমাজ' => 'Social Studies',
+            'সামাজিক বিজ্ঞান' => 'Social Science',
+            'বিজ্ঞান' => 'General Science',
+            'সাধারণ বিজ্ঞান' => 'General Science',
+            'বাংলাদেশ ও বিশ্বপরিচয়' => 'Bangladesh & Global Studies',
+            'বাংলাদেশ ও বিশ্বপরিচয়' => 'Bangladesh & Global Studies',
+            'বাংলাদেশ ও বিশ্বপরিচয় / সাধারণ বিজ্ঞান' => 'Bangladesh & Global Studies',
+            'বাংলাদেশ ও বিশ্বপরিচয় / সাধারণ বিজ্ঞান' => 'Bangladesh & Global Studies',
+            'শারীরিক শিক্ষা ও স্বাস্থ্য' => 'Physical Education & Health',
+            'শারীরিক শিক্ষা' => 'Physical Education',
+            'চারু ও কারুকলা' => 'Arts & Crafts',
+            'কর্ম ও জীবনমুখী শিক্ষা' => 'Work & Life Studies',
+            'গার্হস্থ্য বিজ্ঞান' => 'Home Science',
+            'তথ্য ও যোগাযোগ প্রযুক্তি' => 'Information & Communication Tech (ICT)',
+            'কৃষি শিক্ষা' => 'Agriculture Studies',
+            'জীববিজ্ঞান / ভূগোল' => 'Biology / Geography',
+            'জীব বিজ্ঞান / ভূগোল' => 'Biology / Geography',
+            'জীববিজ্ঞান' => 'Biology',
+            'জীব বিজ্ঞান' => 'Biology',
+            'ভূগোল' => 'Geography',
+            'রসায়ন / অর্থনীতি' => 'Chemistry / Economics',
+            'রসায়ন / অর্থনীতি' => 'Chemistry / Economics',
+            'পদার্থ / ইতিহাস' => 'Physics / History',
+            'উচ্চতর গণিত / কৃষি শিক্ষা' => 'Higher Math / Agriculture',
+            'উচ্চতর গণিত' => 'Higher Mathematics',
+            'S.B.A' => 'S.B.A',
+        ];
+
+        if (isset($map[$trimmed])) {
+            return $map[$trimmed];
+        }
+
+        // Sort keys by string length descending to match longer compound phrases before substrings
+        uksort($map, fn($a, $b) => mb_strlen($b) - mb_strlen($a));
+
+        // Partial match check
+        foreach ($map as $bn => $en) {
+            if (mb_strpos($trimmed, $bn) !== false) {
+                return $en;
+            }
+        }
+
+        return $trimmed;
+    }
+}

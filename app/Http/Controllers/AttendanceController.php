@@ -1,0 +1,372 @@
+<?php
+namespace App\Http\Controllers;
+
+use App\Models\Student;
+use App\Models\Teacher;
+use App\Models\Attendance;
+use App\Models\SmsLog; // এসএমএস লগের জন্য
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon; // ডেট এবং টাইমের জন্য
+
+class AttendanceController extends Controller
+{
+    public function getStudents(Request $request): JsonResponse
+    {
+        $request->validate([
+            'branch_id'       => 'nullable|exists:branches,id',
+            'session_year_id' => 'nullable|exists:session_years,id',
+            'class_id'        => 'nullable|exists:classes,id',
+            'section_id'      => 'nullable|exists:sections,id',
+            'attendance_date' => 'nullable|date',
+            'search'          => 'nullable|string',
+        ]);
+
+        try {
+            $query = Student::query();
+
+            if ($request->filled('branch_id')) $query->where('students.branch_id', $request->branch_id);
+            if ($request->filled('session_year_id')) $query->where('students.session_year_id', $request->session_year_id);
+            if ($request->filled('class_id')) $query->where('students.class_id', $request->class_id);
+            if ($request->filled('section_id')) $query->where('students.section_id', $request->section_id);
+
+            if ($request->filled('search')) {
+                $search = $request->search;
+                $query->where(function($q) use ($search) {
+                    $q->where('students.student_name', 'like', "%{$search}%")
+                      ->orWhere('students.student_identity', 'like', "%{$search}%")
+                      ->orWhere('students.guardian_mobile', 'like', "%{$search}%")
+                      ->orWhere('students.roll_number', 'like', "%{$search}%");
+                });
+            }
+
+            // Calculate stats based on the filtered query (cloning the query before leftJoin and pagination)
+            $allStudentIds = (clone $query)->pluck('students.id');
+            $totalCount = $allStudentIds->count();
+            
+            $date = $request->input('attendance_date', date('Y-m-d'));
+            
+            $presentCount = Attendance::whereIn('student_id', $allStudentIds)
+                ->where('attendance_date', $date)
+                ->whereIn('status', ['Present', 'Late'])
+                ->count();
+                
+            $absentCount = Attendance::whereIn('student_id', $allStudentIds)
+                ->where('attendance_date', $date)
+                ->where('status', 'Absent')
+                ->count();
+
+            $orderBy = 'attendances.updated_at DESC, CAST(students.roll_number AS UNSIGNED) ASC, students.roll_number ASC';
+            if ($request->filled('class_id')) {
+                $orderBy = 'CAST(students.roll_number AS UNSIGNED) ASC, students.roll_number ASC';
+            }
+
+            $students = $query->select('students.id', 'students.student_name', 'students.roll_number', 'students.class_id', 'students.section_id')
+                              ->leftJoin('attendances', function($join) use ($date) {
+                                  $join->on('students.id', '=', 'attendances.student_id')
+                                       ->where('attendances.attendance_date', '=', $date);
+                              })
+                              ->selectRaw('attendances.status as attendance_status, attendances.remarks, attendances.updated_at as attendance_updated_at')
+                              ->with(['schoolClass', 'section'])
+                              ->orderByRaw($orderBy)
+                              ->paginate(15);
+
+            foreach ($students as $student) {
+                $className = $student->schoolClass ? $student->schoolClass->class_name : 'N/A';
+                $sectionName = $student->section ? $student->section->section_name : 'N/A';
+                $student->class_section_name = "{$className} - {$sectionName}";
+            }
+
+            return response()->json([
+                'status' => 'success', 
+                'students' => $students,
+                'stats' => [
+                    'total' => $totalCount,
+                    'present' => $presentCount,
+                    'absent' => $absentCount
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error', 
+                'message' => 'Database Error: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function syncBiometric(Request $request): JsonResponse
+    {
+        $request->validate([
+            'branch_id'       => 'nullable|exists:branches,id',
+            'session_year_id' => 'nullable|exists:session_years,id',
+            'class_id'        => 'nullable|exists:classes,id',
+            'section_id'      => 'nullable|exists:sections,id',
+            'teacher_id'      => 'nullable|exists:teachers,id',
+            'attendance_date' => 'required|date',
+        ]);
+
+        try {
+            $date = $request->attendance_date;
+            $classId = $request->class_id;
+            $sectionId = $request->section_id;
+            $branchId = $request->branch_id;
+            $sessionYearId = $request->session_year_id;
+            $teacherId = $request->teacher_id;
+            $creatorId = Auth::id() ?? 1;
+
+            // 1. Get raw logs grouped by card number
+            $zkService = app(\App\Services\ZktecoService::class);
+            $cardSwipes = $zkService->getRawLogsByCard($date);
+
+            // 2. Fetch all students in this class/section
+            $studentQuery = Student::query();
+            if ($classId) $studentQuery->where('class_id', $classId);
+            if ($sectionId) $studentQuery->where('section_id', $sectionId);
+            if ($branchId) $studentQuery->where('branch_id', $branchId);
+            if ($sessionYearId) $studentQuery->where('session_year_id', $sessionYearId);
+            
+            $students = $studentQuery->get();
+
+            if ($students->isEmpty()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'No students found matching the selected filters.'
+                ], 400);
+            }
+
+            DB::beginTransaction();
+
+            $syncedCount = 0;
+            $absentStudentIds = [];
+
+            foreach ($students as $student) {
+                $status = 'Absent';
+                $remarks = 'Absent (Biometric Check)';
+                
+                $times = null;
+                if (!empty($student->card_number) && isset($cardSwipes[$student->card_number])) {
+                    $times = $cardSwipes[$student->card_number];
+                } elseif (isset($cardSwipes["id:{$student->id}"])) {
+                    $times = $cardSwipes["id:{$student->id}"];
+                }
+
+                if ($times) {
+                    sort($times);
+                    $checkIn = $times[0];
+                    $checkOut = count($times) > 1 ? end($times) : null;
+                    
+                    $attendanceService = app(\App\Services\AttendanceService::class);
+                    $shift = $student->shift;
+                    if (!$shift) {
+                        $shift = \App\Models\Shift::where('type', 'student')->first();
+                    }
+
+                    $status = 'Present';
+                    if ($shift) {
+                        $punchCarbon = Carbon::parse($date . ' ' . $checkIn, 'Asia/Dhaka');
+                        $status = $attendanceService->calculateStatus($punchCarbon, $shift);
+                    }
+                    
+                    if ($checkOut) {
+                        $remarks = "Card Swiped (In: {$checkIn}, Out: {$checkOut})";
+                    } else {
+                        $remarks = "Card Swiped (In: {$checkIn})";
+                    }
+                    $syncedCount++;
+                } else {
+                    $absentStudentIds[] = $student->id;
+                }
+
+                Attendance::updateOrCreate(
+                    [
+                        'student_id'      => $student->id,
+                        'attendance_date' => $date,
+                    ],
+                    [
+                        'branch_id'       => $student->branch_id,
+                        'session_year_id' => $student->session_year_id,
+                        'class_id'        => $student->class_id,
+                        'section_id'      => $student->section_id,
+                        'teacher_id'      => $teacherId,
+                        'user_id'         => $creatorId,
+                        'status'          => $status,
+                        'remarks'         => $remarks,
+                    ]
+                );
+            }
+
+            DB::commit();
+
+            // ==========================================
+            // SMART ATTENDANCE SMS MODULE FOR BIOMETRIC
+            // ==========================================
+            $smsSentCount = 0;
+            try {
+                $smsService = app(\App\Services\SmsService::class);
+                $attendanceDateFormatted = Carbon::parse($date)->format('d-M-Y');
+                
+                foreach ($students as $student) {
+                    if ($student->sms_status !== 'Active' || empty($student->guardian_mobile)) {
+                        continue;
+                    }
+                    
+                    // Fetch the updated attendance status
+                    $att = Attendance::where('student_id', $student->id)
+                        ->where('attendance_date', $date)
+                        ->first();
+                        
+                    if (!$att) continue;
+                    
+                    if (in_array($att->status, ['Present', 'Late'])) {
+                        // 1. Check-In SMS
+                        $alreadySentToday = SmsLog::where('student_id', $student->id)
+                            ->where('message', 'like', "%{$attendanceDateFormatted}%")
+                            ->where('message', 'like', '%entered the school%')
+                            ->exists();
+                            
+                        if (!$alreadySentToday) {
+                            preg_match('/In:\s*(\d{2}:\d{2}:\d{2})/', $att->remarks, $inMatches);
+                            $timeStr = isset($inMatches[1]) ? $inMatches[1] : '';
+                            if (empty($timeStr)) {
+                                preg_match('/\((.*?)\)/', $att->remarks, $matches);
+                                $timeStr = isset($matches[1]) ? $matches[1] : '';
+                            }
+                            $timeFormatted = !empty($timeStr) ? Carbon::parse($timeStr)->format('h:i A') : '';
+                            
+                            $timeMessage = !empty($timeFormatted) ? " at {$timeFormatted}" : "";
+                            $statusLabel = $att->status === 'Late' ? ' (Late)' : '';
+                            
+                            $msg = "Dear Guardian, your child {$student->student_name} has entered the school{$timeMessage} on {$attendanceDateFormatted}{$statusLabel}. - MACS School";
+                            $smsService->sendSms($student->guardian_mobile, $msg, $student->id);
+                            $smsSentCount++;
+                        }
+                        
+                        // 2. Check-Out SMS
+                        if (str_contains($att->remarks, 'Out:')) {
+                            $alreadySentOutToday = SmsLog::where('student_id', $student->id)
+                                ->where('message', 'like', "%{$attendanceDateFormatted}%")
+                                ->where('message', 'like', '%left the school%')
+                                ->exists();
+                                
+                            if (!$alreadySentOutToday) {
+                                preg_match('/Out:\s*(\d{2}:\d{2}:\d{2})/', $att->remarks, $outMatches);
+                                $outTimeStr = isset($outMatches[1]) ? $outMatches[1] : '';
+                                if (!empty($outTimeStr)) {
+                                    $outTimeFormatted = Carbon::parse($outTimeStr)->format('h:i A');
+                                    
+                                    $msg = "Dear Guardian, your child {$student->student_name} has left the school at {$outTimeFormatted} on {$attendanceDateFormatted}. - MACS School";
+                                    $smsService->sendSms($student->guardian_mobile, $msg, $student->id);
+                                    $smsSentCount++;
+                                }
+                            }
+                        }
+                    } elseif ($att->status === 'Absent') {
+                        $alreadySentToday = SmsLog::where('student_id', $student->id)
+                            ->where('message', 'like', "%{$attendanceDateFormatted}%")
+                            ->where('message', 'like', '%ABSENT today%')
+                            ->exists();
+                            
+                        if (!$alreadySentToday) {
+                            $msg = "Dear Guardian, your child {$student->student_name} is ABSENT today ({$attendanceDateFormatted}). Please contact the school. - MACS School";
+                            $smsService->sendSms($student->guardian_mobile, $msg, $student->id);
+                            $smsSentCount++;
+                        }
+                    }
+                }
+            } catch (\Exception $smsEx) {
+                \Log::error("Biometric Sync SMS Notification Failed: " . $smsEx->getMessage());
+            }
+            // ==========================================
+
+            $smsNotice = $smsSentCount > 0 ? " and sent {$smsSentCount} SMS to guardian(s)!" : "";
+
+            return response()->json([
+                'status' => 'success',
+                'message' => "Successfully synced attendance logs. Marked {$syncedCount} Present/Late, " . count($absentStudentIds) . " Absent" . $smsNotice . ".",
+                'synced_count' => $syncedCount,
+                'absent_count' => count($absentStudentIds)
+            ], 200);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Biometric sync failed: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function reportIndex()
+    {
+        return view('pages.attendance.report');
+    }
+
+    public function getReportData(Request $request): JsonResponse
+    {
+        try {
+            $query = Attendance::with(['student', 'class', 'section', 'teacher.user']);
+
+            if ($request->filled('branch_id')) $query->where('branch_id', $request->branch_id);
+            if ($request->filled('session_year_id')) $query->where('session_year_id', $request->session_year_id);
+            if ($request->filled('class_id')) $query->where('class_id', $request->class_id);
+            if ($request->filled('section_id')) $query->where('section_id', $request->section_id);
+            if ($request->filled('attendance_date')) $query->where('attendance_date', $request->attendance_date);
+
+            $reportData = $query->latest('attendance_date')->get();
+
+            return response()->json([
+                'status' => 'success',
+                'data' => $reportData
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Get the latest 15 attendance logs for the dashboard default view
+     */
+    public function getRecentLogs(): JsonResponse
+    {
+        try {
+            $logs = Attendance::with(['student', 'class', 'section'])
+                ->orderBy('created_at', 'desc')
+                ->take(15)
+                ->get();
+                
+            return response()->json([
+                'status' => 'success',
+                'logs' => $logs
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get ZKTeco biometric machine connection status
+     */
+    public function getDeviceStatus(): JsonResponse
+    {
+        try {
+            $zkService = app(\App\Services\ZktecoService::class);
+            $status = $zkService->getConnectionStatus();
+            
+            return response()->json([
+                'status' => 'success',
+                'device' => $status
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ], 500);
+        }
+    }
+}
